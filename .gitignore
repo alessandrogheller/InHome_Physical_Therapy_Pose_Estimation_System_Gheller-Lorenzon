@@ -1,3 +1,14 @@
+# Dataset
+
+dataset/
+
+# Virtual environment
+
+venv/
+.venv/
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
