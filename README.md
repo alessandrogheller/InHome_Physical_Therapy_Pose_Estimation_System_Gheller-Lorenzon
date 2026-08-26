@@ -1,21 +1,19 @@
-# Project_CV_25_26
+# InHome_Physical_Therapy_Pose_Estimation_System
 Computer Vision project about In-home physical therapy pose estimation system
 
-# cosa fare prima di avviare tutto:
-
-# 0. creare il venv se non esiste:
+# 0. Create the venv, if not done yet:
     python -m venv venv
 
-# 1. attivare il venv:
-    .\.venv\Scripts\Activate.ps1
-
-    (se dà un errore di sicurezza, usare il codice:
-
+# 1. Activate the venv:
+    .\venv\Scripts\Activate.ps1
+    if there is a policy problem, execute this command too
         Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+    then active again the venv
 
-    e poi riaprive il venv con il codice sopra ".\.venv\Scripts....")
 
-# 2. installare le dipendenze:
-    pip install ultralytics opencv-python scipy torch pyyaml  ## per l'acquisizione tramite webcam
+# 2. Install dependancies:
+    pip install ultralytics opencv-python scipy torch pyyaml  # webcam acquisition
     pip install scipy torch pyyaml
     pip install fastdtw
+
+# 3. 

@@ -1,13 +1,8 @@
 # Dataset
-
 dataset/
 
-# Virtual environment
-
-venv/
-.venv/
-
-
+# YOLOv8 model weights
+yolov8n-pose.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -162,8 +157,9 @@ activemq-data/
 .env
 .envrc
 .venv
-env/
 venv/
+.venv/
+env/
 ENV/
 env.bak/
 venv.bak/
