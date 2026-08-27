@@ -4,6 +4,9 @@ dataset/
 # YOLOv8 model weights
 yolov8n-pose.pt
 
+# Reference curve
+squat_reference.npy
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

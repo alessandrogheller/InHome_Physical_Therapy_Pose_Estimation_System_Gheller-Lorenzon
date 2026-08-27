@@ -3,11 +3,11 @@ import os
 import numpy as np
 
 # Add the mmfi_lib folder to the project path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'mmfi_lib'))
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-DATASET_ROOT = 'D:\\Università\\2 Magistrale\\2025-26\\secondo semestre\\computer vision\\progetto\\scripts_folder\\MMFi_Dataset'  # <-- replace with your actual path
+DATASET_ROOT = 'D:\\Università\\2 Magistrale\\2025-26\\secondo semestre\\computer vision\\progetto\\InHome_Physical_Therapy_Pose_Estimation_System_Gheller-Lorenzon\\dataset\\MMFi_Dataset'  # <-- replace with your actual path
 SUBJECT = 'S01'
 ACTION = 'A12'  # A12 = Squat
 
@@ -44,17 +44,17 @@ def calcola_angolo(a, b, c):
     return np.degrees(np.arccos(cos_angolo))
 
 # Calculate the left knee angle for each frame in the sequence
-angoli_ginocchio_sx = []
+knee_angles_left = []
 for frame_kp in keypoints_seq:
     anca = frame_kp[LEFT_HIP]
     ginocchio = frame_kp[LEFT_KNEE]
     caviglia = frame_kp[LEFT_ANKLE]
     angolo = calcola_angolo(anca, ginocchio, caviglia)
-    angoli_ginocchio_sx.append(angolo)
+    knee_angles_left.append(angolo)
 
-angoli_ginocchio_sx = np.array(angoli_ginocchio_sx)
-print("Left knee angles over time (first 10 frames):", angoli_ginocchio_sx[:10])
+knee_angles_left = np.array(knee_angles_left)
+print("Left knee angles over time (first 10 frames):", knee_angles_left[:10])
 
 # Save the reference curve for use in Phase 3
-np.save('riferimento_squat_ginocchio.npy', angoli_ginocchio_sx)
+np.save('squat_reference.npy', knee_angles_left)
 print("Reference curve saved.")
