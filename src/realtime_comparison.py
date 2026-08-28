@@ -2,7 +2,6 @@ import cv2
 import os
 import numpy as np
 from ultralytics import YOLO
-from fastdtw import fastdtw
 
 # Project root directory
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -31,11 +30,17 @@ def calculate_angle(a, b, c):
 
 # --- Thresholds for the repetition detector ---
 # Based on the reference range (min ~85°, max ~180°): tune if needed
-HIGH_THRESHOLD = 145.0   # above this angle = considered "standing"
-LOW_THRESHOLD = 125.0    # below this angle = considered "moving/down"
+HIGH_THRESHOLD = 165.0   # above this angle = considered "standing"
+LOW_THRESHOLD = 145.0    # below this angle = considered "moving/down"
 MIN_REP_FRAMES = 10      # discard repetitions that are too short (likely noise)
 
-MAX_ERROR_THRESHOLD = 30.0  # average difference in degrees = 100% error (tune this)
+MAX_ERROR_THRESHOLD = 45.0  # depth difference in degrees = 100% error (tune this)
+
+# --- Smoothing filter for the angle signal ---
+# Reduces frame-to-frame jitter from keypoint detection noise (see discussion:
+# monocular 2D pose estimation has no temporal memory between frames).
+SMOOTHING_FACTOR = 0.3  # lower = smoother/slower to react, higher = more responsive
+smoothed_angle = None
 
 # --- Detector state ---
 state = "standing"  # or "moving"
@@ -69,8 +74,15 @@ while True:
         kp = results[0].keypoints.xy[0].cpu().numpy()
 
         if np.any(kp[LEFT_HIP]) and np.any(kp[LEFT_KNEE]) and np.any(kp[LEFT_ANKLE]):
-            angle = calculate_angle(kp[LEFT_HIP], kp[LEFT_KNEE], kp[LEFT_ANKLE])
+            raw_angle = calculate_angle(kp[LEFT_HIP], kp[LEFT_KNEE], kp[LEFT_ANKLE])
 
+            # Apply exponential smoothing to reduce jitter
+            if smoothed_angle is None:
+                smoothed_angle = raw_angle
+            else:
+                smoothed_angle = SMOOTHING_FACTOR * raw_angle + (1 - SMOOTHING_FACTOR) * smoothed_angle
+
+            angle = smoothed_angle  # use the smoothed value everywhere below
             # --- State machine logic ---
             if state == "standing":
                 # Keep a rolling history of the standing angle, used later
@@ -100,10 +112,16 @@ while True:
 
                         corrected_rep = [a + calibration_offset for a in rep_buffer]
 
-                        distance, path = fastdtw(corrected_rep, reference, dist=lambda a, b: abs(a - b))
-                        average_difference = distance / len(path)
-                        print(f"DEBUG average_difference = {average_difference:.4f} (offset applied: {calibration_offset:.1f}°)")
-                        error_pct = min(100.0, (average_difference / MAX_ERROR_THRESHOLD) * 100)
+                        # Depth-based scoring: how close did the user get to
+                        # the target depth (minimum angle) of the reference?
+                        # This reflects what matters clinically: how deep the
+                        # squat went, rather than the shape of the whole curve.
+                        depth_achieved = min(corrected_rep)
+                        depth_target = reference.min()
+                        depth_diff = abs(depth_achieved - depth_target)
+
+                        print(f"DEBUG depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°)")
+                        error_pct = min(100.0, (depth_diff / MAX_ERROR_THRESHOLD) * 100)
                         accuracy_pct = 100.0 - error_pct
 
                         last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"
