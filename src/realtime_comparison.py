@@ -1,13 +1,10 @@
 import cv2
-import os
-import csv
 import time
 import numpy as np
-from datetime import datetime
 from ultralytics import YOLO
 
 from utils import (
-    PROJECT_ROOT, MODEL_PATH, REFERENCE_PATH, LOG_DIR,
+    MODEL_PATH, REFERENCE_PATH,
     LEFT_HIP, LEFT_KNEE, LEFT_ANKLE,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
     select_patient_keypoints,
@@ -72,9 +69,6 @@ calibration_start_time = time.time()
 # keep following the same person frame-to-frame instead of "jumping" to
 # someone else who enters the frame (e.g. a caregiver).
 patient_center = None
-
-# Session log, saved to CSV on exit for later analysis/reporting.
-session_log = []
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -179,16 +173,6 @@ while True:
                         else:
                             last_color = (0, 0, 255)
 
-                        session_log.append({
-                            'timestamp': datetime.now().isoformat(),
-                            'depth_achieved': round(float(depth_achieved), 2),
-                            'depth_target': round(float(depth_target), 2),
-                            'depth_diff': round(float(depth_diff), 2),
-                            'calibration_offset': round(float(calibration_offset), 2),
-                            'accuracy_pct': round(float(accuracy_pct), 2),
-                            'rep_n_frames': len(rep_buffer),
-                        })
-
                         print(f"Rep: depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° "
                               f"diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°) "
                               f"-> score={accuracy_pct:.1f}%")
@@ -215,15 +199,3 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-
-# --- Save session log to CSV for later analysis/reporting ---
-if session_log:
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, f'session_{datetime.now():%Y%m%d_%H%M%S}.csv')
-    with open(log_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=session_log[0].keys())
-        writer.writeheader()
-        writer.writerows(session_log)
-    print(f"\nSession log saved to: {log_path} ({len(session_log)} repetitions)")
-else:
-    print("\nNo repetitions recorded this session.")
