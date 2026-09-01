@@ -2,12 +2,19 @@ import sys
 import os
 import numpy as np
 
-# Add the mmfi_lib folder to the path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'mmfi_lib'))
+from utils import (
+    PROJECT_ROOT, DATASET_ROOT, LEFT_HIP, LEFT_KNEE, LEFT_ANKLE,
+    calculate_angle, calculate_depth_score, keypoints_are_valid,
+    DEPTH_TOLERANCE,
+)
+
+# Add the mmfi_lib folder to the path (mmfi_lib is a sibling of src/, at PROJECT_ROOT)
+sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-DATASET_ROOT = r'D:\Università\2 Magistrale\2025-26\secondo semestre\computer vision\progetto\InHome_Physical_Therapy_Pose_Estimation_System_Gheller-Lorenzon\dataset\MMFi_Dataset'
+# DATASET_ROOT now comes from utils.py (PROJECT_ROOT/dataset/MMFi_Dataset),
+# no more hardcoded Windows path -> works on any machine/OS.
 ACTION = 'A12'  # A12 = Squat
 ENVIRONMENT = 'E01'
 
@@ -16,9 +23,8 @@ STANDING_TARGET = 180.0
 STANDING_TOLERANCE = 1.0
 
 DEPTH_TARGET = 95.0
-DEPTH_TOLERANCE = 10.0       # "good zone": within this range, score stays high (80-100%)
-DEPTH_FALLOFF_RANGE = 30.0   # beyond the tolerance, score decreases gradually over
-                              # this extra range, down to 0%
+# DEPTH_TOLERANCE / falloff are imported from utils.py so this script uses the
+# exact same scoring function as the live webcam pipeline (realtime_comparison.py).
 
 # Auto-detect subject folders inside the environment
 environment_path = os.path.join(DATASET_ROOT, ENVIRONMENT)
@@ -27,30 +33,6 @@ SUBJECTS = sorted([
     if os.path.isdir(os.path.join(environment_path, name)) and name.startswith('S')
 ])
 print(f"Found {len(SUBJECTS)} subjects in {ENVIRONMENT}: {SUBJECTS}\n")
-
-# COCO keypoint indices
-LEFT_HIP, LEFT_KNEE, LEFT_ANKLE = 11, 13, 15
-
-def calculate_angle(a, b, c):
-    """Calculate the angle (in degrees) at vertex b, between segments a-b and b-c."""
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba = a - b
-    bc = c - b
-    cos_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-8)
-    cos_angle = np.clip(cos_angle, -1.0, 1.0)
-    return np.degrees(np.arccos(cos_angle))
-
-def calculate_depth_score(depth_diff):
-    """Two-zone scoring: high plateau within tolerance, gradual falloff beyond it.
-    - Within DEPTH_TOLERANCE: score from 100% (perfect) down to 80% (at the edge)
-    - Beyond it: score decreases from 80% down to 0% over DEPTH_FALLOFF_RANGE
-    """
-    if depth_diff <= DEPTH_TOLERANCE:
-        return 100.0 - (depth_diff / DEPTH_TOLERANCE) * 20.0
-    else:
-        extra = depth_diff - DEPTH_TOLERANCE
-        score = 80.0 - (extra / DEPTH_FALLOFF_RANGE) * 80.0
-        return max(0.0, score)
 
 database = MMFi_Database(DATASET_ROOT)
 
@@ -70,16 +52,26 @@ for subject in SUBJECTS:
         keypoints_seq = sample['input_rgb']
 
         angles = []
+        n_skipped = 0
         for frame_kp in keypoints_seq:
-            hip = frame_kp[LEFT_HIP]
-            knee = frame_kp[LEFT_KNEE]
-            ankle = frame_kp[LEFT_ANKLE]
-            if np.any(hip) and np.any(knee) and np.any(ankle):
+            # MMFi does not expose a per-keypoint confidence score, so
+            # kp_conf=None here -> keypoints_are_valid() falls back to the
+            # "not all-zero" check. If your version of MMFi does provide a
+            # confidence array, pass it here instead of None for a stricter,
+            # more robust filter (same logic used live in realtime_comparison.py).
+            if keypoints_are_valid(frame_kp, None, [LEFT_HIP, LEFT_KNEE, LEFT_ANKLE]):
+                hip = frame_kp[LEFT_HIP]
+                knee = frame_kp[LEFT_KNEE]
+                ankle = frame_kp[LEFT_ANKLE]
                 angles.append(calculate_angle(hip, knee, ankle))
+            else:
+                n_skipped += 1
 
         if len(angles) == 0:
             print(f"{subject}: no valid keypoints found, skipping.")
             continue
+        if n_skipped > 0:
+            print(f"{subject}: skipped {n_skipped}/{len(keypoints_seq)} frames with missing/invalid keypoints.")
 
         # No calibration offset here: all MMFi subjects share the same
         # camera setup within the dataset, unlike the live webcam case.
@@ -93,7 +85,7 @@ for subject in SUBJECTS:
         depth_within_tolerance = depth_diff <= DEPTH_TOLERANCE
 
         # Score based on depth (the clinically meaningful metric), using the
-        # two-zone scoring function (plateau within tolerance, gradual falloff beyond it)
+        # shared two-zone scoring function from utils.py.
         accuracy_pct = calculate_depth_score(depth_diff)
 
         results.append({
@@ -129,3 +121,8 @@ print(f"Subjects within depth tolerance: {n_within_tolerance}/{len(results)} "
 print(f"Depth diff from target: mean={np.mean(depth_diffs):.1f}°  std={np.std(depth_diffs):.1f}°")
 print(f"Score: mean={np.mean(scores):.1f}%  std={np.std(scores):.1f}%  "
       f"min={np.min(scores):.1f}%  max={np.max(scores):.1f}%")
+
+# List of subjects that scored well -> useful as candidates for building a
+# multi-subject reference curve in reference_extraction.py (see GOOD_SUBJECTS).
+good_subjects = [r['subject'] for r in results if r['depth_within_tolerance']]
+print(f"\nSubjects within depth tolerance (candidates for a 'good' reference): {good_subjects}")

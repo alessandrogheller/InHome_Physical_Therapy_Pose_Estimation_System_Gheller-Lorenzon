@@ -1,58 +1,80 @@
 import cv2
 import os
+import csv
+import time
 import numpy as np
+from datetime import datetime
 from ultralytics import YOLO
 
-# Project root directory
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from utils import (
+    PROJECT_ROOT, MODEL_PATH, REFERENCE_PATH, LOG_DIR,
+    LEFT_HIP, LEFT_KNEE, LEFT_ANKLE,
+    calculate_angle, calculate_depth_score, keypoints_are_valid,
+    select_patient_keypoints,
+)
 
-# Load the YOLO-Pose model
-model = YOLO(os.path.join(PROJECT_ROOT, 'yolov8n-pose.pt'))
-
-# Load the reference curve
-reference = np.load(os.path.join(PROJECT_ROOT, 'squat_reference.npy'))
+# --- Load model and reference (now via portable paths from utils.py) ---
+model = YOLO(MODEL_PATH)
+reference = np.load(REFERENCE_PATH)
 
 print(f"Reference loaded: {len(reference)} frames.")
 print(f"Reference range: min={reference.min():.1f}°, max={reference.max():.1f}°")
 
-# COCO keypoint indices
-LEFT_HIP, LEFT_KNEE, LEFT_ANKLE = 11, 13, 15
-
-def calculate_angle(a, b, c):
-    """Calculate the angle (in degrees) at vertex b, between segments a-b and b-c."""
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba = a - b
-    bc = c - b
-    cos_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-8)
-    cos_angle = np.clip(cos_angle, -1.0, 1.0)
-    return np.degrees(np.arccos(cos_angle))
-
-
 # --- Thresholds for the repetition detector ---
-# Based on the reference range (min ~85°, max ~180°): tune if needed
+# These are derived from the reference range by default. If a patient's own
+# range of motion never reaches HIGH_THRESHOLD (e.g. reduced mobility), an
+# initial adaptive calibration phase (below) re-estimates them from the
+# patient's own observed range instead.
 HIGH_THRESHOLD = 165.0   # above this angle = considered "standing"
 LOW_THRESHOLD = 145.0    # below this angle = considered "moving/down"
 MIN_REP_FRAMES = 10      # discard repetitions that are too short (likely noise)
 
-MAX_ERROR_THRESHOLD = 45.0  # depth difference in degrees = 100% error (tune this)
+# Fix: previously the live score used a different (linear) formula than the
+# offline MMFi evaluation. Both now use calculate_depth_score() from utils.py
+# so the two pipelines are directly comparable.
+
+# --- Adaptive threshold calibration ---
+# If True, the first CALIBRATION_DURATION seconds are used to observe the
+# patient's own range of motion and set HIGH/LOW_THRESHOLD relative to it,
+# instead of using the fixed values above (which assume a healthy-range
+# reference and may never be reached by a patient with reduced mobility).
+USE_ADAPTIVE_THRESHOLDS = True
+CALIBRATION_DURATION = 5.0  # seconds; ask the patient to stand still at first
+
+# --- Timeout for an in-progress repetition ---
+# If the angle never comes back above HIGH_THRESHOLD within this many
+# seconds, the repetition is discarded instead of leaving the state machine
+# stuck in "moving" forever.
+MAX_MOVING_DURATION = 8.0  # seconds
 
 # --- Smoothing filter for the angle signal ---
-# Reduces frame-to-frame jitter from keypoint detection noise (see discussion:
-# monocular 2D pose estimation has no temporal memory between frames).
 SMOOTHING_FACTOR = 0.3  # lower = smoother/slower to react, higher = more responsive
 smoothed_angle = None
 
 # --- Detector state ---
-state = "standing"  # or "moving"
+state = "calibrating" if USE_ADAPTIVE_THRESHOLDS else "standing"
 rep_buffer = []
 last_result_text = "Waiting for movement..."
 last_color = (200, 200, 200)
+moving_start_time = None
 
-# Tracks the user's recent "standing" angle, used to calibrate the offset
-# between the user's setup (camera angle, body proportions) and the
+# Tracks the patient's recent "standing" angle, used to calibrate the offset
+# between the patient's setup (camera angle, body proportions) and the
 # reference sequence, without distorting the depth/amplitude of the squat.
 standing_angle_history = []
 MAX_STANDING_HISTORY = 10
+
+# Calibration-phase buffer (only used if USE_ADAPTIVE_THRESHOLDS)
+calibration_angles = []
+calibration_start_time = time.time()
+
+# Multi-person tracking: remembers where the patient was last seen so we
+# keep following the same person frame-to-frame instead of "jumping" to
+# someone else who enters the frame (e.g. a caregiver).
+patient_center = None
+
+# Session log, saved to CSV on exit for later analysis/reporting.
+session_log = []
 
 cap = cv2.VideoCapture(0)
 if not cap.isOpened():
@@ -61,6 +83,8 @@ if not cap.isOpened():
 
 cv2.namedWindow('Movement Comparison - Press Q to quit', cv2.WINDOW_NORMAL)
 print("Press 'q' to quit.")
+if USE_ADAPTIVE_THRESHOLDS:
+    print(f"Calibrating for {CALIBRATION_DURATION:.0f}s -- please stand still and face the camera.")
 
 while True:
     ret, frame = cap.read()
@@ -70,59 +94,82 @@ while True:
     results = model(frame, verbose=False)
     annotated_frame = results[0].plot()
 
-    if results[0].keypoints is not None and len(results[0].keypoints.xy) > 0:
-        kp = results[0].keypoints.xy[0].cpu().numpy()
+    kp, kp_conf, new_center = select_patient_keypoints(results, previous_center=patient_center)
 
-        if np.any(kp[LEFT_HIP]) and np.any(kp[LEFT_KNEE]) and np.any(kp[LEFT_ANKLE]):
+    if kp is not None:
+        patient_center = new_center
+        # Visual feedback: mark which detected person is being tracked as the patient.
+        cv2.circle(annotated_frame, (int(patient_center[0]), int(patient_center[1])),
+                   8, (255, 0, 255), -1)
+
+        if keypoints_are_valid(kp, kp_conf, [LEFT_HIP, LEFT_KNEE, LEFT_ANKLE]):
             raw_angle = calculate_angle(kp[LEFT_HIP], kp[LEFT_KNEE], kp[LEFT_ANKLE])
 
-            # Apply exponential smoothing to reduce jitter
+            # Exponential smoothing to reduce frame-to-frame jitter
             if smoothed_angle is None:
                 smoothed_angle = raw_angle
             else:
                 smoothed_angle = SMOOTHING_FACTOR * raw_angle + (1 - SMOOTHING_FACTOR) * smoothed_angle
 
-            angle = smoothed_angle  # use the smoothed value everywhere below
+            angle = smoothed_angle
+
+            # --- Adaptive threshold calibration phase ---
+            if state == "calibrating":
+                calibration_angles.append(angle)
+                if time.time() - calibration_start_time > CALIBRATION_DURATION:
+                    obs_min = min(calibration_angles)
+                    obs_max = max(calibration_angles)
+                    obs_range = max(obs_max - obs_min, 1e-3)
+                    HIGH_THRESHOLD = obs_max - 0.1 * obs_range
+                    LOW_THRESHOLD = obs_max - 0.3 * obs_range
+                    state = "standing"
+                    print(f"Calibration done: standing baseline={obs_max:.1f}°  "
+                          f"HIGH_THRESHOLD={HIGH_THRESHOLD:.1f}°  LOW_THRESHOLD={LOW_THRESHOLD:.1f}°")
+
             # --- State machine logic ---
-            if state == "standing":
-                # Keep a rolling history of the standing angle, used later
-                # to calibrate the offset against the reference sequence.
+            elif state == "standing":
                 standing_angle_history.append(angle)
                 if len(standing_angle_history) > MAX_STANDING_HISTORY:
                     standing_angle_history.pop(0)
 
                 if angle < LOW_THRESHOLD:
-                    # Start of a new repetition
                     state = "moving"
                     rep_buffer = [angle]
+                    moving_start_time = time.time()
+
             elif state == "moving":
                 rep_buffer.append(angle)
-                if angle > HIGH_THRESHOLD:
-                    # End of the repetition: the patient is back standing
+
+                timed_out = (time.time() - moving_start_time) > MAX_MOVING_DURATION
+
+                if timed_out:
+                    # Fix: without this, a patient who never reaches
+                    # HIGH_THRESHOLD (e.g. limited mobility, or briefly
+                    # leaving the frame) would leave the detector stuck in
+                    # "moving" indefinitely.
+                    last_result_text = "Movement timeout, discarded"
+                    last_color = (150, 150, 150)
+                    state = "standing"
+                    rep_buffer = []
+
+                elif angle > HIGH_THRESHOLD:
                     state = "standing"
 
                     if len(rep_buffer) >= MIN_REP_FRAMES and len(standing_angle_history) > 0:
-                        # Calibration: align the user's standing angle to the
-                        # reference's standing angle. This shifts the curve
-                        # up/down to remove systematic bias (camera angle,
-                        # body proportions) WITHOUT stretching it, so the
-                        # actual depth/amplitude of the squat is preserved.
+                        # Calibration: align the patient's standing angle to
+                        # the reference's standing angle (additive shift
+                        # only, so the actual depth/amplitude is preserved).
                         user_standing_baseline = np.mean(standing_angle_history)
                         calibration_offset = reference.max() - user_standing_baseline
-
                         corrected_rep = [a + calibration_offset for a in rep_buffer]
 
-                        # Depth-based scoring: how close did the user get to
-                        # the target depth (minimum angle) of the reference?
-                        # This reflects what matters clinically: how deep the
-                        # squat went, rather than the shape of the whole curve.
                         depth_achieved = min(corrected_rep)
                         depth_target = reference.min()
                         depth_diff = abs(depth_achieved - depth_target)
 
-                        print(f"DEBUG depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°)")
-                        error_pct = min(100.0, (depth_diff / MAX_ERROR_THRESHOLD) * 100)
-                        accuracy_pct = 100.0 - error_pct
+                        # Unified scoring: same two-zone function used offline
+                        # on the MMFi dataset (evaluate_dataset_fixed_targets.py).
+                        accuracy_pct = calculate_depth_score(depth_diff)
 
                         last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"
                         if accuracy_pct >= 80:
@@ -131,15 +178,31 @@ while True:
                             last_color = (0, 200, 255)
                         else:
                             last_color = (0, 0, 255)
+
+                        session_log.append({
+                            'timestamp': datetime.now().isoformat(),
+                            'depth_achieved': round(float(depth_achieved), 2),
+                            'depth_target': round(float(depth_target), 2),
+                            'depth_diff': round(float(depth_diff), 2),
+                            'calibration_offset': round(float(calibration_offset), 2),
+                            'accuracy_pct': round(float(accuracy_pct), 2),
+                            'rep_n_frames': len(rep_buffer),
+                        })
+
+                        print(f"Rep: depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° "
+                              f"diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°) "
+                              f"-> score={accuracy_pct:.1f}%")
                     else:
                         last_result_text = "Movement too short, discarded"
                         last_color = (150, 150, 150)
 
-                    print(f"Your rep range: min={min(rep_buffer):.1f}°, max={max(rep_buffer):.1f}° | Reference range: min={reference.min():.1f}°, max={reference.max():.1f}°")
                     rep_buffer = []
+    else:
+        # Nobody detected this frame: don't update angle/state, just show the frame.
+        pass
 
     # --- On-screen status text ---
-    state_text = "STANDING" if state == "standing" else "MOVING..."
+    state_text = {"calibrating": "CALIBRATING...", "standing": "STANDING", "moving": "MOVING..."}[state]
     cv2.putText(annotated_frame, state_text, (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
     cv2.putText(annotated_frame, last_result_text, (20, 80),
@@ -152,3 +215,15 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+
+# --- Save session log to CSV for later analysis/reporting ---
+if session_log:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, f'session_{datetime.now():%Y%m%d_%H%M%S}.csv')
+    with open(log_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=session_log[0].keys())
+        writer.writeheader()
+        writer.writerows(session_log)
+    print(f"\nSession log saved to: {log_path} ({len(session_log)} repetitions)")
+else:
+    print("\nNo repetitions recorded this session.")

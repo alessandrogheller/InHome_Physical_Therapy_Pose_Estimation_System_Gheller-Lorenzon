@@ -2,59 +2,107 @@ import sys
 import os
 import numpy as np
 
-# Add the mmfi_lib folder to the project path
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'mmfi_lib'))
+from utils import (
+    PROJECT_ROOT, DATASET_ROOT, REFERENCE_PATH,
+    LEFT_HIP, LEFT_KNEE, LEFT_ANKLE,
+    calculate_angle, keypoints_are_valid,
+)
+
+sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-DATASET_ROOT = 'D:\\Università\\2 Magistrale\\2025-26\\secondo semestre\\computer vision\\progetto\\InHome_Physical_Therapy_Pose_Estimation_System_Gheller-Lorenzon\\dataset\\MMFi_Dataset'  # <-- replace with your actual path
-SUBJECT = 'S01'
 ACTION = 'A12'  # A12 = Squat
 
-# --- Load the database and the specific sequence ---
+# One or more subjects to build the reference from. Using several subjects
+# (instead of a single, arbitrarily chosen one) and averaging their curves
+# gives a more robust reference, less dependent on one person's individual
+# technique or body proportions.
+#
+# Ideally pick subjects that scored well in evaluate_dataset_fixed_targets.py
+# (see the "good_subjects" list printed at the end of that script).
+SUBJECTS = ['S01']  # e.g. ['S01', 'S03', 'S07'] to average multiple subjects
+
+# Number of points used to resample every subject's sequence to a common
+# length before averaging (needed because raw sequences have different
+# numbers of frames). This is a simple normalized-time alignment, not a full
+# Dynamic Time Warping -- good enough for a single-repetition reference.
+REFERENCE_LENGTH = 100
+
 database = MMFi_Database(DATASET_ROOT)
-data_form = {SUBJECT: [ACTION]}
 
-dataset = MMFi_Dataset(
-    data_base=database,
-    data_unit='sequence',
-    modality='rgb',
-    split='reference',
-    data_form=data_form
-)
 
-sample = dataset[0]
-keypoints_seq = sample['input_rgb']  # shape of the action: (num_frame, 17, 2)
-print("Shape of the input_rgb sequence:", keypoints_seq.shape)
+def extract_knee_angle_sequence(subject):
+    """Load one subject's squat sequence and return the (filtered) left-knee
+    angle over time as a 1D numpy array."""
+    data_form = {subject: [ACTION]}
+    dataset = MMFi_Dataset(
+        data_base=database,
+        data_unit='sequence',
+        modality='rgb',
+        split='reference',
+        data_form=data_form
+    )
+    sample = dataset[0]
+    keypoints_seq = sample['input_rgb']  # (num_frame, 17, 2)
 
-# --- CALCULATION OF ANGLES ---
-# 
+    angles = []
+    n_skipped = 0
+    for frame_kp in keypoints_seq:
+        # Fix vs. the original script: frames with missing/invalid keypoints
+        # are now skipped instead of silently producing a spurious angle.
+        if keypoints_are_valid(frame_kp, None, [LEFT_HIP, LEFT_KNEE, LEFT_ANKLE]):
+            hip = frame_kp[LEFT_HIP]
+            knee = frame_kp[LEFT_KNEE]
+            ankle = frame_kp[LEFT_ANKLE]
+            angles.append(calculate_angle(hip, knee, ankle))
+        else:
+            n_skipped += 1
 
-# COCO keypoint indices (same format as YOLOv8-Pose)
-LEFT_HIP, LEFT_KNEE, LEFT_ANKLE = 11, 13, 15
-RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE = 12, 14, 16
+    if n_skipped > 0:
+        print(f"  {subject}: skipped {n_skipped}/{len(keypoints_seq)} frames with missing/invalid keypoints.")
 
-def calcola_angolo(a, b, c):
-    """Calculate the angle in degrees at vertex b, between segments a-b and b-c."""
-    a, b, c = np.array(a), np.array(b), np.array(c)
-    ba = a - b
-    bc = c - b
-    cos_angolo = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc) + 1e-8)
-    cos_angolo = np.clip(cos_angolo, -1.0, 1.0)
-    return np.degrees(np.arccos(cos_angolo))
+    return np.array(angles)
 
-# Calculate the left knee angle for each frame in the sequence
-knee_angles_left = []
-for frame_kp in keypoints_seq:
-    anca = frame_kp[LEFT_HIP]
-    ginocchio = frame_kp[LEFT_KNEE]
-    caviglia = frame_kp[LEFT_ANKLE]
-    angolo = calcola_angolo(anca, ginocchio, caviglia)
-    knee_angles_left.append(angolo)
 
-knee_angles_left = np.array(knee_angles_left)
-print("Left knee angles over time (first 10 frames):", knee_angles_left[:10])
+def resample(sequence, length):
+    """Resample a 1D sequence to `length` points using linear interpolation
+    over normalized time [0, 1]. Lets us average sequences of different
+    original lengths point-by-point."""
+    if len(sequence) == length:
+        return sequence
+    original_t = np.linspace(0.0, 1.0, num=len(sequence))
+    target_t = np.linspace(0.0, 1.0, num=length)
+    return np.interp(target_t, original_t, sequence)
 
-# Save the reference curve for use in Phase 3
-np.save('squat_reference.npy', knee_angles_left)
-print("Reference curve saved.")
+
+# --- Build the reference curve ---
+resampled_sequences = []
+for subject in SUBJECTS:
+    print(f"Loading {subject}...")
+    seq = extract_knee_angle_sequence(subject)
+    if len(seq) == 0:
+        print(f"  {subject}: no valid keypoints found, skipping this subject.")
+        continue
+    print(f"  {subject}: {len(seq)} valid frames, range=[{seq.min():.1f}°, {seq.max():.1f}°]")
+    resampled_sequences.append(resample(seq, REFERENCE_LENGTH))
+
+if len(resampled_sequences) == 0:
+    print("No subject produced a valid sequence. Aborting.")
+    sys.exit(1)
+
+# Average across subjects, point-by-point on the normalized timeline.
+# With a single subject in SUBJECTS this simply returns that subject's
+# (resampled) curve, so the script still works exactly as before if you
+# only list one subject.
+reference_curve = np.mean(np.stack(resampled_sequences, axis=0), axis=0)
+
+print(f"\nReference built from {len(resampled_sequences)} subject(s), "
+      f"{REFERENCE_LENGTH} points.")
+print(f"Reference range: min={reference_curve.min():.1f}°, max={reference_curve.max():.1f}°")
+
+# Save the reference curve for use in Phase 3 (realtime_comparison.py),
+# now to an absolute, portable path (PROJECT_ROOT/squat_reference.npy)
+# instead of a relative path that depended on the current working directory.
+np.save(REFERENCE_PATH, reference_curve)
+print(f"Reference curve saved to: {REFERENCE_PATH}")

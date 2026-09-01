@@ -1,9 +1,13 @@
 import cv2
 from ultralytics import YOLO
 
+from utils import MODEL_PATH
+
 # Load the model YOLOv8 pose (version "nano", lightweight and fast for CPU)
-# On first run, it automatically downloads (~6 MB)
-model = YOLO('yolov8n-pose.pt')
+# Path now comes from utils.py (PROJECT_ROOT/yolov8n-pose.pt) instead of a
+# bare relative filename, so this works regardless of the current working
+# directory the script is launched from.
+model = YOLO(MODEL_PATH)
 
 # Open the webcam (0 = default PC webcam)
 cap = cv2.VideoCapture(0)
@@ -24,6 +28,9 @@ while True:
         break
 
     # Execute pose estimation on the current frame
+    # Note: this demo script draws ALL detected people (no patient
+    # selection). See realtime_comparison.py for the multi-person-aware
+    # version used for actual scoring.
     results = model(frame, verbose=False)
 
     # Draw the skeleton automatically on the frame
