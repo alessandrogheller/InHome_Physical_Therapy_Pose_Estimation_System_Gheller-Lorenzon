@@ -31,6 +31,11 @@ REFERENCE_PATH = get_reference_path('squat')  # kept for backward compatibility 
 LEFT_HIP, LEFT_KNEE, LEFT_ANKLE = 11, 13, 15
 RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE = 12, 14, 16
 
+# Upper-limb joints (needed for arm movements such as A07/A08 "limb
+# extension" -- angle measured at the elbow, between shoulder-elbow-wrist).
+LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST = 5, 7, 9
+RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST = 6, 8, 10
+
 # --- Scoring parameters (shared between offline and online evaluation) -----
 DEPTH_TOLERANCE = 10.0        # "good zone": within this range, score stays high (80-100%)
 DEPTH_FALLOFF_RANGE = 30.0    # beyond the tolerance, score decreases gradually to 0%

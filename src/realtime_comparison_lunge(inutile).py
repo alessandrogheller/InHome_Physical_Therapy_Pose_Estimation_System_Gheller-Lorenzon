@@ -170,7 +170,7 @@ working_side = None if TRACKED_SIDE == 'auto' else TRACKED_SIDE
 # webcam. If you have more than one camera (an external USB webcam plus a
 # laptop's built-in one, for example), try 1, 2, etc. See the chat message
 # for how to find out which index corresponds to which physical camera.
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 
 patient_center = None
 

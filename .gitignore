@@ -6,7 +6,7 @@ yolov8n-pose.pt
 
 # Reference curve
 squat_reference.npy
-lunge_reference.npy
+lunge_left_reference.npy
 lunge_right_reference.npy
 
 
