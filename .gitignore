@@ -6,6 +6,9 @@ yolov8n-pose.pt
 
 # Reference curve
 squat_reference.npy
+lunge_reference.npy
+lunge_right_reference.npy
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
