@@ -8,7 +8,7 @@ from utils import (
     LEFT_HIP, LEFT_KNEE, LEFT_ANKLE,
     RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
-    select_patient_keypoints,
+    select_patient_keypoints, KP_CONF_THRESHOLD,
 )
 
 REFERENCE_PATH = get_reference_path('lunge')  # -> PROJECT_ROOT/lunge_reference.npy
@@ -17,11 +17,12 @@ REFERENCE_PATH = get_reference_path('lunge')  # -> PROJECT_ROOT/lunge_reference.
 # --- Debug logging ---
 # Set to True to print, every frame during "calibrating" and "moving",
 # the raw/smoothed angle and whether keypoints were valid (with their
-# confidences). Extremely useful to diagnose "calibration finishes but the
-# rep is never detected" style problems: if you see many valid=False during
-# the lunge's deepest point, or a raw angle that dips low but the smoothed
-# one barely moves, that tells you exactly which stage is failing.
-DEBUG = True
+# confidences). Useful for diagnosing detection problems, but noisy for
+# normal use -- leave False for day-to-day sessions. When False, the only
+# thing printed to the terminal is the one-line "Rep: ..." result per
+# repetition; everything else (calibration instructions, status, warnings)
+# is shown as an overlay on the video window instead.
+DEBUG = False
 
 # --- Which leg to track ---
 # The reference curve (lunge_reference.npy) was built from the LEFT knee,
@@ -46,24 +47,63 @@ LEG_JOINTS = {
     'right': (RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE),
 }
 
+# --- Asymmetric confidence threshold for the ankle ---
+# In the calibration logs, hip and knee confidence were almost always >0.9,
+# but ankle confidence hovered right around KP_CONF_THRESHOLD (0.5) --
+# sometimes 0.51, sometimes 0.49 -- and kept invalidating the whole
+# hip-knee-ankle triplet even though the knee itself (what we actually
+# measure) was tracked perfectly. This is expected for a lateral lunge: the
+# loaded ankle rotates/foreshortens relative to the camera as you go down,
+# which is exactly when the model is least confident about it. Since we
+# only need the ankle to define the lower segment of the angle (small
+# errors in its exact position barely change the knee angle), we accept a
+# lower confidence for it specifically instead of using KP_CONF_THRESHOLD
+# for all three joints.
+ANKLE_CONF_THRESHOLD = 0.35
+
+
+def leg_keypoints_valid(kp_xy, kp_conf, joints):
+    """Like keypoints_are_valid, but applies ANKLE_CONF_THRESHOLD to the
+    ankle and the normal KP_CONF_THRESHOLD to hip/knee, instead of one
+    threshold for all three. `joints` is (hip_idx, knee_idx, ankle_idx)."""
+    hip_i, knee_i, ankle_i = joints
+    if kp_conf is not None:
+        return (kp_conf[hip_i] >= KP_CONF_THRESHOLD
+                and kp_conf[knee_i] >= KP_CONF_THRESHOLD
+                and kp_conf[ankle_i] >= ANKLE_CONF_THRESHOLD)
+    return keypoints_are_valid(kp_xy, kp_conf, list(joints))
+
+
 # --- Fallback for missing/low-confidence keypoints ---
 # Lateral lunges rotate/partially occlude the loaded leg right at the
 # deepest point of the movement -- exactly where the pose model is most
-# likely to drop below KP_CONF_THRESHOLD. Previously, an invalid frame was
-# silently skipped (no angle update at all), which meant the true minimum
-# angle could be missed entirely if it coincided with a low-confidence
-# frame. Instead, we hold the last valid raw angle for a short number of
-# frames so a brief confidence dip doesn't erase the deepest part of the
-# rep. If keypoints stay invalid longer than this, we stop updating (better
-# to lose a frame than to fabricate data from a stale, no-longer-true pose).
-MAX_HOLD_FRAMES = 5
+# likely to drop below confidence threshold. Previously, an invalid frame
+# was silently skipped (no angle update at all), which meant the true
+# minimum angle could be missed entirely if it coincided with a
+# low-confidence frame. Instead, we hold the last valid raw angle for a
+# number of frames so a confidence dip doesn't erase the deepest part of
+# the rep. Raised from 5 to 20: the logs showed occlusion gaps of up to
+# ~15-20 consecutive invalid frames right at the bottom of the movement,
+# and 5 frames of hold was nowhere near enough to bridge that. If keypoints
+# stay invalid longer than this, we stop updating (better to lose a frame
+# than to fabricate data from a stale, no-longer-true pose).
+MAX_HOLD_FRAMES = 20
+
+# --- Debounce before ending a repetition ---
+# Previously, a single noisy frame above HIGH_THRESHOLD (e.g. right after
+# recovering from an occlusion gap, with the angle rebounding sharply) was
+# enough to end the "moving" state and score the rep -- even though the
+# patient hadn't actually returned to standing yet. Requiring several
+# consecutive frames above threshold filters out that kind of spike.
+STANDING_CONFIRM_FRAMES = 3
+standing_confirm_count = 0
 
 # --- Load model and reference ---
 model = YOLO(MODEL_PATH)
 reference = np.load(REFERENCE_PATH)
-
-print(f"Reference loaded: {len(reference)} frames.")
-print(f"Reference range: min={reference.min():.1f}°, max={reference.max():.1f}°")
+# (Reference info is no longer printed to the terminal -- it's stable
+# across runs and not needed for day-to-day use. Re-enable prints here if
+# you want to double check the loaded file while debugging.)
 
 # --- Thresholds for the repetition detector ---
 # IMPORTANT: the 165/145 values used in the squat pipeline were tuned for a
@@ -125,18 +165,29 @@ calibration_angles = {'left': [], 'right': []} if TRACKED_SIDE == 'auto' else {T
 calibration_start_time = time.time()
 working_side = None if TRACKED_SIDE == 'auto' else TRACKED_SIDE
 
+# --- Which camera to use ---
+# Index passed to cv2.VideoCapture. 0 is normally the default/built-in
+# webcam. If you have more than one camera (an external USB webcam plus a
+# laptop's built-in one, for example), try 1, 2, etc. See the chat message
+# for how to find out which index corresponds to which physical camera.
+CAMERA_INDEX = 1
+
 patient_center = None
 
-cap = cv2.VideoCapture(0)
+# --- On-screen messaging (replaces the old terminal prints) ---
+# calibration_instruction: shown continuously while state == "calibrating".
+# transient_message: (text, expire_timestamp, bgr_color) shown for a few
+# seconds after calibration ends (success, failure, or a low-ROM warning),
+# then cleared automatically.
+calibration_instruction = ""
+transient_message = None
+
+cap = cv2.VideoCapture(CAMERA_INDEX)
 if not cap.isOpened():
     print("Error: could not open the webcam.")
     exit()
 
 cv2.namedWindow('Lunge Comparison - Press Q to quit', cv2.WINDOW_NORMAL)
-print("Press 'q' to quit.")
-if USE_ADAPTIVE_THRESHOLDS:
-    print(f"Calibrating for {CALIBRATION_DURATION:.0f}s -- stand still and face the camera, "
-          f"then perform ONE full lunge repetition (step out and back) before it ends.")
 
 while True:
     ret, frame = cap.read()
@@ -154,13 +205,20 @@ while True:
                    8, (255, 0, 255), -1)
 
         if state == "calibrating":
+            elapsed = time.time() - calibration_start_time
+            remaining = max(0.0, CALIBRATION_DURATION - elapsed)
+            if elapsed < 2.0:
+                calibration_instruction = "Stand still and face the camera..."
+            else:
+                calibration_instruction = "Perform ONE full lunge repetition to calibrate the system"
+
             # Track every candidate leg so we can pick the one that actually
             # moves. keypoints_are_valid / calculate_angle are evaluated
             # per-leg since one leg may be valid while the other is occluded.
             for side, joints in LEG_JOINTS.items():
                 if side not in calibration_angles:
                     continue
-                if keypoints_are_valid(kp, kp_conf, list(joints)):
+                if leg_keypoints_valid(kp, kp_conf, joints):
                     hip_i, knee_i, ankle_i = joints
                     a = calculate_angle(kp[hip_i], kp[knee_i], kp[ankle_i])
                     calibration_angles[side].append(a)
@@ -170,7 +228,7 @@ while True:
                 elif DEBUG:
                     print(f"[calib][{side}] INVALID keypoints, skipped")
 
-            if time.time() - calibration_start_time > CALIBRATION_DURATION:
+            if elapsed > CALIBRATION_DURATION:
                 # Pick the working leg: whichever has the larger observed
                 # range of motion. If TRACKED_SIDE forced a side, that's the
                 # only key present and this just uses it directly.
@@ -179,14 +237,16 @@ while True:
                     if len(angles) < 2:
                         continue
                     rng = max(angles) - min(angles)
-                    print(f"Calibration [{side}]: {len(angles)} valid frames, "
-                          f"range=[{min(angles):.1f}°, {max(angles):.1f}°] (ROM={rng:.1f}°)")
+                    if DEBUG:
+                        print(f"Calibration [{side}]: {len(angles)} valid frames, "
+                              f"range=[{min(angles):.1f}°, {max(angles):.1f}°] (ROM={rng:.1f}°)")
                     if rng > best_range:
                         best_side, best_range, best_angles = side, rng, angles
 
                 if best_side is None:
-                    print("Calibration FAILED: no leg produced enough valid keypoints. "
-                          "Check lighting/framing and restart.")
+                    transient_message = (
+                        "Calibration failed: no leg detected reliably. Please retry.",
+                        time.time() + 4.0, (0, 0, 255))
                     state = "standing"
                     HIGH_THRESHOLD = reference.max() - 0.1 * _ref_range
                     LOW_THRESHOLD = reference.max() - 0.3 * _ref_range
@@ -199,18 +259,19 @@ while True:
                     HIGH_THRESHOLD = obs_max - 0.1 * obs_range
                     LOW_THRESHOLD = obs_max - 0.3 * obs_range
                     state = "standing"
-                    print(f"Calibration done: working_side={working_side}  "
-                          f"standing baseline={obs_max:.1f}°  "
-                          f"HIGH_THRESHOLD={HIGH_THRESHOLD:.1f}°  LOW_THRESHOLD={LOW_THRESHOLD:.1f}°")
                     if best_range < 15.0:
-                        print(f"WARNING: observed range of motion is only {best_range:.1f}°. "
-                              "This is suspiciously small for a full lunge repetition -- "
-                              "thresholds may be unreliable. Make sure you actually performed "
-                              "a full rep during calibration and that the working leg stayed "
-                              "in frame and well-lit.")
+                        transient_message = (
+                            f"Warning: detected range of motion is very small ({best_range:.0f} deg). "
+                            "Results may be unreliable.",
+                            time.time() + 5.0, (0, 165, 255))
+                    else:
+                        leg_label = "left" if working_side == "left" else "right"
+                        transient_message = (
+                            f"Calibration complete (leg: {leg_label})",
+                            time.time() + 3.0, (0, 200, 0))
 
         elif working_side is not None:
-            joints_valid = keypoints_are_valid(kp, kp_conf, list(LEG_JOINTS[working_side]))
+            joints_valid = leg_keypoints_valid(kp, kp_conf, LEG_JOINTS[working_side])
 
             if joints_valid:
                 hip_i, knee_i, ankle_i = LEG_JOINTS[working_side]
@@ -256,6 +317,7 @@ while True:
                     state = "moving"
                     rep_buffer = [angle]
                     moving_start_time = time.time()
+                    standing_confirm_count = 0
 
             elif state == "moving":
                 rep_buffer.append(angle)
@@ -267,42 +329,60 @@ while True:
                     last_color = (150, 150, 150)
                     state = "standing"
                     rep_buffer = []
+                    standing_confirm_count = 0
 
                 elif angle > HIGH_THRESHOLD:
-                    state = "standing"
+                    standing_confirm_count += 1
+                    if DEBUG:
+                        print(f"[moving][{working_side}] above HIGH_THRESHOLD "
+                              f"({standing_confirm_count}/{STANDING_CONFIRM_FRAMES} to confirm standing)")
 
-                    if len(rep_buffer) >= MIN_REP_FRAMES and len(standing_angle_history) > 0:
-                        user_standing_baseline = np.mean(standing_angle_history)
-                        calibration_offset = reference.max() - user_standing_baseline
-                        corrected_rep = [a + calibration_offset for a in rep_buffer]
-
-                        depth_achieved = min(corrected_rep)
-                        depth_target = reference.min()
-                        depth_diff = abs(depth_achieved - depth_target)
-
-                        # Same two-zone scoring function used for the squat,
-                        # so results stay comparable in structure (score is
-                        # still 0-100%). The clinical meaning of the target
-                        # itself is weaker here, see the note in
-                        # evaluate_dataset_fixed_targets_lunge.py.
-                        accuracy_pct = calculate_depth_score(depth_diff)
-
-                        last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"
-                        if accuracy_pct >= 80:
-                            last_color = (0, 200, 0)
-                        elif accuracy_pct >= 50:
-                            last_color = (0, 200, 255)
-                        else:
-                            last_color = (0, 0, 255)
-
-                        print(f"Rep: depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° "
-                              f"diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°) "
-                              f"-> score={accuracy_pct:.1f}%")
+                    if standing_confirm_count < STANDING_CONFIRM_FRAMES:
+                        # Not confirmed yet -- could be a noise spike right
+                        # after an occlusion gap. Stay in "moving" and keep
+                        # appending to rep_buffer so we don't lose real data
+                        # if it turns out the patient really is still going.
+                        pass
                     else:
-                        last_result_text = "Movement too short, discarded"
-                        last_color = (150, 150, 150)
+                        state = "standing"
+                        standing_confirm_count = 0
 
-                    rep_buffer = []
+                        if len(rep_buffer) >= MIN_REP_FRAMES and len(standing_angle_history) > 0:
+                            user_standing_baseline = np.mean(standing_angle_history)
+                            calibration_offset = reference.max() - user_standing_baseline
+                            corrected_rep = [a + calibration_offset for a in rep_buffer]
+
+                            depth_achieved = min(corrected_rep)
+                            depth_target = reference.min()
+                            depth_diff = abs(depth_achieved - depth_target)
+
+                            # Same two-zone scoring function used for the squat,
+                            # so results stay comparable in structure (score is
+                            # still 0-100%). The clinical meaning of the target
+                            # itself is weaker here, see the note in
+                            # evaluate_dataset_fixed_targets_lunge.py.
+                            accuracy_pct = calculate_depth_score(depth_diff)
+
+                            last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"
+                            if accuracy_pct >= 80:
+                                last_color = (0, 200, 0)
+                            elif accuracy_pct >= 50:
+                                last_color = (0, 200, 255)
+                            else:
+                                last_color = (0, 0, 255)
+
+                            print(f"Rep: depth_achieved={depth_achieved:.1f}° depth_target={depth_target:.1f}° "
+                                  f"diff={depth_diff:.1f}° (offset: {calibration_offset:.1f}°) "
+                                  f"-> score={accuracy_pct:.1f}%")
+                        else:
+                            last_result_text = "Movement too short, discarded"
+                            last_color = (150, 150, 150)
+
+                        rep_buffer = []
+                else:
+                    # Angle dropped back below HIGH_THRESHOLD before we
+                    # confirmed standing -- reset the debounce counter.
+                    standing_confirm_count = 0
     else:
         pass
 
@@ -313,8 +393,19 @@ while True:
                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, last_color, 2, cv2.LINE_AA)
 
     if state == "calibrating":
-        cv2.putText(annotated_frame, "Perform ONE full lunge rep now", (20, 120),
+        cv2.putText(annotated_frame, calibration_instruction, (20, 120),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+        remaining = max(0.0, CALIBRATION_DURATION - (time.time() - calibration_start_time))
+        cv2.putText(annotated_frame, f"Time remaining: {remaining:0.0f}s", (20, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
+
+    if transient_message is not None:
+        text, expire_at, color = transient_message
+        if time.time() < expire_at:
+            cv2.putText(annotated_frame, text, (20, 180),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+        else:
+            transient_message = None
 
     cv2.imshow('Lunge Comparison - Press Q to quit', annotated_frame)
 
