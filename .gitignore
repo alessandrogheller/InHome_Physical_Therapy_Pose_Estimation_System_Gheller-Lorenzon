@@ -8,6 +8,8 @@ yolov8n-pose.pt
 squat_reference.npy
 lunge_left_reference.npy
 lunge_right_reference.npy
+limb_extension_right_reference.npy
+limb_extension_left_reference.npy
 
 
 # Byte-compiled / optimized / DLL files
