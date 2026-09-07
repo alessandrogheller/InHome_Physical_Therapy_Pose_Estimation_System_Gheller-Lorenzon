@@ -30,7 +30,7 @@ REFERENCE_PATH = get_reference_path('jumping_jacks')
 #     since those are the moments you actually want to see.
 # "Rep: ..." results are always printed regardless of DEBUG -- that line is
 # the actual output of the program, not a debug aid.
-DEBUG = True
+DEBUG = False
 DEBUG_FRAME_STRIDE = 5  # print at most 1 out of every N frames when DEBUG is on
 _debug_frame_counter = 0
 
@@ -229,7 +229,7 @@ last_color = (200, 200, 200)
 moving_start_time = None
 rep_count = 0
 
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 patient_center = None
 
 cap = cv2.VideoCapture(CAMERA_INDEX)
