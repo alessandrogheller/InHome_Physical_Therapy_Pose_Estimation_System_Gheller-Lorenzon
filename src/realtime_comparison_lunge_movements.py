@@ -168,10 +168,10 @@ MIN_REP_FRAMES = 10  # discard repetitions that are too short (likely noise)
 # make HIGH_THRESHOLD and LOW_THRESHOLD end up almost identical and useless
 # for detecting repetitions.
 USE_ADAPTIVE_THRESHOLDS = True
-CALIBRATION_DURATION = 8.0  # seconds; long enough to stand still briefly, then do one full rep
+CALIBRATION_DURATION = 12.0  # seconds; long enough to stand still briefly, then do one full rep
 
 # --- Timeout for an in-progress repetition ---
-MAX_MOVING_DURATION = 8.0  # seconds
+MAX_MOVING_DURATION = 10.0  # seconds
 
 # --- Smoothing filter for the angle signal ---
 # Raised from 0.3 to 0.5: with a fast movement like a lateral lunge (the
