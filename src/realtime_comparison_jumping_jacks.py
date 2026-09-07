@@ -10,65 +10,132 @@ from utils import (
     LEFT_WRIST, RIGHT_WRIST,
     LEFT_ANKLE, RIGHT_ANKLE,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
-    select_patient_keypoints, KP_CONF_THRESHOLD, DEPTH_TOLERANCE, DEPTH_FALLOFF_RANGE,
+    select_patient_keypoints, KP_CONF_THRESHOLD,
 )
 
 # Reference built by reference_extraction_jumping_jacks.py: a single
 # (REFERENCE_LENGTH, 2) array, column 0 = leg_spread_ratio curve,
 # column 1 = arm_raise_angle curve (degrees). See that script for why a
-# jumping jack needs two signals instead of one knee angle.
+# jumping jack needs these two signals instead of a knee angle.
 REFERENCE_PATH = get_reference_path('jumping_jacks')
 
 # --- Debug logging ---
-# Set to True to print, every frame, the raw/smoothed values for both
-# signals and the current thresholds. Noisy -- leave False for normal
-# sessions. When False, the only thing printed to the terminal is the
-# one-line "Rep: ..." result per repetition; everything else (calibration
-# instructions, status, warnings) is shown as an overlay on the video
-# window instead.
-DEBUG = False
+# Set to True for extra terminal output while tuning thresholds. Unlike
+# before, this NO LONGER prints one line per frame -- that produced
+# thousands of lines per session and made it impossible to actually read.
+# Instead:
+#   - during "calibrating": one summary line every DEBUG_FRAME_STRIDE frames
+#   - during "waiting"/"open": one line every DEBUG_FRAME_STRIDE frames,
+#     PLUS an immediate line on every state change (rep start / rep end),
+#     since those are the moments you actually want to see.
+# "Rep: ..." results are always printed regardless of DEBUG -- that line is
+# the actual output of the program, not a debug aid.
+DEBUG = True
+DEBUG_FRAME_STRIDE = 5  # print at most 1 out of every N frames when DEBUG is on
+_debug_frame_counter = 0
+
+
+def dbg(msg, force=False):
+    """Print a debug line, throttled to 1/DEBUG_FRAME_STRIDE frames unless
+    force=True (used for state transitions / rep events, which should always
+    show up immediately)."""
+    if not DEBUG:
+        return
+    if force or (_debug_frame_counter % DEBUG_FRAME_STRIDE == 0):
+        print(msg)
+
 
 # --- On-screen messaging ---
 calibration_instruction = ""
 transient_message = None
 
-# --- Keypoints required every frame ---
-# Jumping jacks are bilateral/symmetric (unlike the lunge or single-arm
-# limb extension), so there's no "auto-detect the working side" step here
-# -- we always need both shoulders, both hips, both wrists and both ankles
-# to compute the two signals.
-REQUIRED_KEYPOINTS = [
-    LEFT_SHOULDER, RIGHT_SHOULDER,
-    LEFT_HIP, RIGHT_HIP,
-    LEFT_WRIST, RIGHT_WRIST,
-    LEFT_ANKLE, RIGHT_ANKLE,
-]
+# --- Load model and reference ---
+model = YOLO(MODEL_PATH)
+try:
+    reference = np.load(REFERENCE_PATH)
+except FileNotFoundError:
+    print(f"Error: reference file not found at {REFERENCE_PATH}. "
+          "Run reference_extraction_jumping_jacks.py first.")
+    exit()
+
+ref_leg_spread = reference[:, 0]
+ref_arm_raise = reference[:, 1]
+print(f"Reference loaded: leg_spread range=[{ref_leg_spread.min():.2f}, {ref_leg_spread.max():.2f}]  "
+      f"arm_raise range=[{ref_arm_raise.min():.1f}°, {ref_arm_raise.max():.1f}°]")
+
+# Targets = the "fully open" extreme of each signal in the reference
+# (jack's open position: legs apart, arms overhead).
+#
+# NOTE: using the raw max() here made leg-spread scores consistently very
+# low (~25-40%) even on visually solid reps, while arm scores stayed high.
+# That pattern points to the target itself being off, not the patient's
+# form: the reference was built from MM-Fi action A26 "Jumping up" as a
+# proxy (see reference_extraction_jumping_jacks.py -- MM-Fi has no real
+# jumping-jack action), and a single noisy keypoint frame (e.g. motion-blur
+# briefly displacing an ankle during the jump) can produce one extreme
+# spike that raw max() would lock onto as "the" target. The 95th percentile
+# still represents "close to the top of the observed range" but is far less
+# sensitive to one outlier frame.
+LEG_SPREAD_TARGET = float(np.percentile(ref_leg_spread, 95))
+ARM_RAISE_TARGET = float(np.percentile(ref_arm_raise, 95))
+
+# Tolerance/falloff for scoring, expressed as a FRACTION of the reference's
+# own range of motion for each signal (rather than fixed absolute units,
+# since one signal is a unitless ratio and the other is in degrees -- a
+# single absolute tolerance like the squat's DEPTH_TOLERANCE=10deg would
+# make no sense applied to the leg-spread ratio). 15%/35% mirrors the
+# shape of the squat/lunge two-zone scoring (DEPTH_TOLERANCE / DEPTH_
+# FALLOFF_RANGE), just rescaled per-signal.
+_leg_rom = ref_leg_spread.max() - ref_leg_spread.min()
+_arm_rom = ref_arm_raise.max() - ref_arm_raise.min()
+LEG_TOLERANCE = 0.15 * _leg_rom
+LEG_FALLOFF = 0.35 * _leg_rom
+ARM_TOLERANCE = 0.15 * _arm_rom
+ARM_FALLOFF = 0.35 * _arm_rom
+
+# --- Required keypoints and per-joint confidence thresholds ---
+# Shoulders/hips/ankles are usually tracked reliably throughout. Wrists,
+# however, move fast and can motion-blur or self-occlude right at the top
+# of the jack (arms overhead, near the edge of frame) -- same issue seen
+# with the elbow-extension script's wrist tracking. We accept a lower
+# confidence for wrists specifically instead of applying KP_CONF_THRESHOLD
+# to all eight joints.
+WRIST_CONF_THRESHOLD = 0.35
+CORE_JOINTS = [LEFT_SHOULDER, RIGHT_SHOULDER, LEFT_HIP, RIGHT_HIP, LEFT_ANKLE, RIGHT_ANKLE]
+ALL_JOINTS = CORE_JOINTS + [LEFT_WRIST, RIGHT_WRIST]
 
 
-def compute_signals(kp_xy):
-    """Compute (leg_spread_ratio, arm_raise_angle) for one frame's
-    keypoints. Assumes REQUIRED_KEYPOINTS have already been validated by
-    the caller. Mirrors extract_jumping_jack_signals() in
-    reference_extraction_jumping_jacks.py so the live and offline pipelines
-    use exactly the same geometry."""
-    left_shoulder = kp_xy[LEFT_SHOULDER]
-    right_shoulder = kp_xy[RIGHT_SHOULDER]
-    left_hip = kp_xy[LEFT_HIP]
-    right_hip = kp_xy[RIGHT_HIP]
-    left_wrist = kp_xy[LEFT_WRIST]
-    right_wrist = kp_xy[RIGHT_WRIST]
-    left_ankle = kp_xy[LEFT_ANKLE]
-    right_ankle = kp_xy[RIGHT_ANKLE]
+def signals_valid(kp_xy, kp_conf):
+    if kp_conf is not None:
+        core_ok = all(kp_conf[i] >= KP_CONF_THRESHOLD for i in CORE_JOINTS)
+        wrists_ok = (kp_conf[LEFT_WRIST] >= WRIST_CONF_THRESHOLD
+                     and kp_conf[RIGHT_WRIST] >= WRIST_CONF_THRESHOLD)
+        return core_ok and wrists_ok
+    return keypoints_are_valid(kp_xy, None, ALL_JOINTS)
 
-    shoulder_width = float(np.linalg.norm(np.array(left_shoulder, dtype=float)
-                                           - np.array(right_shoulder, dtype=float)))
+
+def euclidean(a, b):
+    a, b = np.array(a, dtype=float), np.array(b, dtype=float)
+    return float(np.linalg.norm(a - b))
+
+
+def compute_signals(kp):
+    """Return (leg_spread_ratio, arm_raise_angle) for one frame's keypoints,
+    or None if the frame is degenerate (near-zero shoulder width)."""
+    left_shoulder = kp[LEFT_SHOULDER]
+    right_shoulder = kp[RIGHT_SHOULDER]
+    left_hip = kp[LEFT_HIP]
+    right_hip = kp[RIGHT_HIP]
+    left_wrist = kp[LEFT_WRIST]
+    right_wrist = kp[RIGHT_WRIST]
+    left_ankle = kp[LEFT_ANKLE]
+    right_ankle = kp[RIGHT_ANKLE]
+
+    shoulder_width = euclidean(left_shoulder, right_shoulder)
     if shoulder_width < 1e-3:
-        return None  # degenerate frame, caller should treat as invalid
+        return None
 
-    ankle_dist = float(np.linalg.norm(np.array(left_ankle, dtype=float)
-                                       - np.array(right_ankle, dtype=float)))
-    leg_spread_ratio = ankle_dist / shoulder_width
-
+    leg_spread_ratio = euclidean(left_ankle, right_ankle) / shoulder_width
     left_arm_angle = calculate_angle(left_hip, left_shoulder, left_wrist)
     right_arm_angle = calculate_angle(right_hip, right_shoulder, right_wrist)
     arm_raise_angle = (left_arm_angle + right_arm_angle) / 2.0
@@ -77,136 +144,92 @@ def compute_signals(kp_xy):
 
 
 # --- Fallback for missing/low-confidence keypoints ---
-# At the fully-open point of a jack, wrists (overhead, often motion-blurred)
-# and ankles (wide stance, near frame edges) are the keypoints most likely
-# to briefly drop below confidence threshold -- exactly the extremes we
-# need to measure. Rather than dropping those frames outright (which could
-# erase the true peak spread/raise), we hold the last valid pair of signals
-# for a limited number of frames. If keypoints stay invalid longer than
-# this, we stop updating -- better to lose a frame than fabricate data from
-# a stale pose.
+# Same rationale as the lunge/limb-extension scripts: a confidence dip
+# right at the extremes of the movement (arms overhead here) shouldn't
+# silently drop the frame and risk missing the true peak. We hold the last
+# valid signals for a limited number of frames before giving up.
 MAX_HOLD_FRAMES = 20
 last_valid_signals = None
 hold_frames_left = 0
 
-# --- Debounce before ending a repetition ---
-# A single noisy frame that dips back toward the closed pose right after a
-# confidence drop (signal rebounding sharply) shouldn't be enough to close
-# out the repetition before the patient has actually returned to the
-# starting stance. Requiring several consecutive confirming frames (on
-# BOTH signals) filters out that kind of spike.
-CLOSED_CONFIRM_FRAMES = 3
-closed_confirm_count = 0
+MIN_REP_FRAMES = 8         # discard repetitions that are too short (likely noise)
+MAX_MOVING_DURATION = 6.0  # seconds; safety timeout in case a rep never resolves
 
-# --- Load model and reference ---
-model = YOLO(MODEL_PATH)
-try:
-    reference = np.load(REFERENCE_PATH)
-except FileNotFoundError:
-    print(f"Error: no reference curve found at {REFERENCE_PATH}. "
-          "Run reference_extraction_jumping_jacks.py first.")
-    exit()
-
-reference_spread_curve = reference[:, 0]
-reference_arm_curve = reference[:, 1]
-
-# Scoring targets: how far the movement should open, taken from the
-# population reference -- NOT from the patient's own calibration. Unlike
-# the squat's knee angle (which needs a per-patient standing-baseline
-# offset to correct for camera/body differences), both of these signals
-# are already scale-invariant by construction: leg_spread_ratio is
-# normalized by the patient's own shoulder width, and arm_raise_angle is
-# an angle. So, exactly like the limb-extension script's reasoning for a
-# fully-extended arm, we score the raw achieved peak directly against the
-# reference peak, with no additive correction.
-SPREAD_TARGET = float(reference_spread_curve.max())
-ARM_TARGET = float(reference_arm_curve.max())
-
-print(f"Reference loaded: leg_spread target={SPREAD_TARGET:.2f}  "
-      f"arm_raise target={ARM_TARGET:.1f}°")
-
-# --- Scoring tolerance for the leg-spread ratio ---
-# DEPTH_TOLERANCE/DEPTH_FALLOFF_RANGE (imported from utils.py) are tuned in
-# DEGREES for the squat/lunge/limb-extension angle metrics, so they're
-# reused as-is for arm_raise_angle. But leg_spread_ratio is a unitless
-# distance ratio on a very different scale (typically ~0.5-3.0), so reusing
-# the same numbers would be meaningless. There is no established clinical
-# tolerance for this ratio metric (it's a metric we introduced for this
-# script, not a validated clinical measurement) -- the values below are a
-# reasonable-looking placeholder, not a validated clinical target. Adjust
-# them if you get real feedback on what a meaningful vs. negligible
-# difference in stance width looks like.
-SPREAD_TOLERANCE = 0.3
-SPREAD_FALLOFF_RANGE = 1.0
-
-# --- Thresholds for the repetition detector (per signal) ---
-# Same reasoning as the limb-extension script: baseline is the CLOSED
-# (low-value) pose for both signals -- legs together, arms down -- and a
-# repetition is detected by the signals RISING toward the open extreme and
-# then coming back down. HIGH_THRESHOLD is the trigger to *enter* the
-# movement (crossed while closed) and LOW_THRESHOLD is the trigger to
-# *confirm return to closed* (crossed back while opening).
-#
-# These fixed, reference-derived values only bootstrap state before
-# calibration finishes; adaptive calibration (always on, below) immediately
-# overwrites them from the patient's own observed range, since we can't
-# assume a patient's natural stance width or arm-raise range matches
-# whichever subject(s) built the reference curve.
-_spread_range = reference_spread_curve.max() - reference_spread_curve.min()
-_arm_range = reference_arm_curve.max() - reference_arm_curve.min()
-HIGH_THRESHOLD_SPREAD = reference_spread_curve.min() + 0.3 * _spread_range
-LOW_THRESHOLD_SPREAD = reference_spread_curve.min() + 0.1 * _spread_range
-HIGH_THRESHOLD_ARM = reference_arm_curve.min() + 0.3 * _arm_range
-LOW_THRESHOLD_ARM = reference_arm_curve.min() + 0.1 * _arm_range
-
-MIN_REP_FRAMES = 10  # discard repetitions that are too short (likely noise)
-
-# --- Adaptive threshold calibration ---
-# Always on: we don't know in advance how wide a stance or how high an arm
-# raise is "full" for this particular patient, so thresholds are always
-# re-estimated from their own observed range during the calibration window
-# rather than assumed from the reference curve.
-#
-# IMPORTANT: the patient must perform ONE FULL REPETITION during this
-# window (stand at rest -> open into a jack -> return to rest), not just
-# hold still -- holding still only shows the closed extreme, never the open
-# extreme, and the thresholds would end up nearly identical and useless for
-# detecting repetitions.
-CALIBRATION_DURATION = 8.0  # seconds; long enough to rest briefly, then do one full rep
-
-# --- Timeout for an in-progress repetition ---
-MAX_MOVING_DURATION = 6.0  # seconds; a jumping jack is fast, no need for a long window
-
-# --- Smoothing filter for each signal ---
-# A jack is a fast, ballistic movement -- if the smoothed signal looks too
-# laggy/compressed on your setup, lower this, but validate with DEBUG=True
-# that the smoothed signal still reaches the true peak spread/raise.
+# --- Smoothing filter ---
+# Jumping jacks are a fast, rhythmic movement; a moderate smoothing factor
+# balances jitter reduction against not lagging behind the true peak.
 SMOOTHING_FACTOR = 0.5
-smoothed_spread = None
+smoothed_leg = None
 smoothed_arm = None
 
+# --- Adaptive calibration ---
+# We don't assume any patient's natural standing leg-spread or arm-down
+# angle matches the MMFi reference subject's setup, so thresholds for
+# detecting "open" are always estimated from the patient's own observed
+# range during calibration, exactly like the other realtime scripts.
+# Unlike the lunge (which needs a left/right choice), a jumping jack is
+# bilateral and symmetric, so there is no "working side" to select -- both
+# signals are computed directly from both sides every frame.
+#
+# IMPORTANT: perform a couple of FULL, natural-paced repetitions during
+# this window (stand with legs together/arms down -> jump legs apart with
+# arms overhead -> back down -> repeat once or twice), ideally at the same
+# continuous rhythm you intend to use for the real set. Standing still
+# alone only shows the "closed" extreme, never the "open" extreme.
+CALIBRATION_DURATION = 8.0  # seconds
+calibration_leg = []
+calibration_arm = []
+calibration_start_time = time.time()
+
+# openness(t) combines both signals into a single normalized 0-1 scalar
+# once calibration has established each signal's observed min/max.
+OPENNESS_HIGH_THRESHOLD = 0.3  # crossing above (while "waiting") -> a rep has started opening
+leg_min = leg_max = arm_min = arm_max = None  # set once calibration completes
+
+
+def openness(leg_val, arm_val):
+    leg_component = np.clip((leg_val - leg_min) / max(leg_max - leg_min, 1e-3), 0.0, 1.0)
+    arm_component = np.clip((arm_val - arm_min) / max(arm_max - arm_min, 1e-3), 0.0, 1.0)
+    return 0.5 * leg_component + 0.5 * arm_component
+
+
+# --- Continuous rep detection (peak-prominence based) ---
+# WHY THIS CHANGED: the previous version only finalized a rep once
+# `openness` dropped below a near-zero absolute threshold for several
+# consecutive frames. That works if the patient pauses fully closed
+# between reps, but during CONTINUOUS jumping jacks (no stop) the body's
+# momentum means it often never returns anywhere near "fully closed"
+# between jumps -- so the rep buffer just kept growing across multiple
+# real repetitions until the 6s safety timeout discarded the whole thing.
+#
+# Instead, a rep now ends as soon as `openness` has declined by
+# PEAK_DROP_MARGIN from the highest value seen since the rep started --
+# i.e. we detect that the peak has been passed, regardless of how low the
+# signal goes afterwards. This is a standard "peak with prominence"
+# detector and works whether the patient pauses at the bottom or not.
+#
+# REFRACTORY_PERIOD prevents a second rep from being registered
+# immediately after the first due to jitter right around the peak (e.g.
+# the smoothed signal wobbling up/down by a few points at the top of the
+# jump) -- no new rep can start within this many seconds of the previous
+# one ending.
+PEAK_DROP_MARGIN = 0.15   # normalized openness units (0-1 scale)
+REFRACTORY_PERIOD = 0.25  # seconds
+last_rep_end_time = 0.0
+
 # --- Detector state ---
-# "calibrating": observing one full rep to set per-signal thresholds
-# "closed"     : baseline (legs together, arms down), waiting for a jack to start
-# "open"       : movement in progress, tracking both signals up to their
-#                peak and back down
+# "calibrating": observing the patient's own closed/open range
+# "waiting"    : ready to detect the start of the next rep (rising edge)
+# "open"       : a rep is in progress, tracking its peak
 state = "calibrating"
-rep_buffer_spread = []
-rep_buffer_arm = []
+rep_buffer = []       # list of (leg_spread, arm_raise) tuples during "open"
+peak_openness = 0.0    # running peak of `openness` for the rep in progress
 last_result_text = "Waiting for movement..."
 last_color = (200, 200, 200)
 moving_start_time = None
+rep_count = 0
 
-closed_spread_history = []
-closed_arm_history = []
-MAX_CLOSED_HISTORY = 10
-
-calibration_spread = []
-calibration_arm = []
-
-# --- Which camera to use ---
 CAMERA_INDEX = 1
-
 patient_center = None
 
 cap = cv2.VideoCapture(CAMERA_INDEX)
@@ -214,16 +237,14 @@ if not cap.isOpened():
     print("Error: could not open the webcam.")
     exit()
 
-cv2.namedWindow('Jumping Jacks Comparison - Press Q to quit', cv2.WINDOW_NORMAL)
-
-# Calibration timer starts here (after webcam init), so driver/autofocus
-# warm-up doesn't silently eat into the patient's "get into position" time.
-calibration_start_time = time.time()
+cv2.namedWindow('Jumping Jack Comparison - Press Q to quit', cv2.WINDOW_NORMAL)
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
+
+    _debug_frame_counter += 1
 
     results = model(frame, verbose=False)
     annotated_frame = results[0].plot()
@@ -235,8 +256,8 @@ while True:
         cv2.circle(annotated_frame, (int(patient_center[0]), int(patient_center[1])),
                    8, (255, 0, 255), -1)
 
-        frame_valid = keypoints_are_valid(kp, kp_conf, REQUIRED_KEYPOINTS)
-        raw_signals = compute_signals(kp) if frame_valid else None
+        valid = signals_valid(kp, kp_conf)
+        raw_signals = compute_signals(kp) if valid else None
 
         if raw_signals is not None:
             last_valid_signals = raw_signals
@@ -244,150 +265,109 @@ while True:
         elif last_valid_signals is not None and hold_frames_left > 0:
             raw_signals = last_valid_signals
             hold_frames_left -= 1
-            if DEBUG:
-                print(f"[{state}] keypoints invalid, holding last signals={raw_signals} "
-                      f"({hold_frames_left} frames left)")
+            dbg(f"[{state}] keypoints invalid, holding last signals "
+                f"({hold_frames_left} frames left)")
         else:
             raw_signals = None
-            if DEBUG:
-                print(f"[{state}] keypoints invalid, no hold left -- frame dropped")
+            dbg(f"[{state}] keypoints invalid, no hold left -- frame dropped")
 
         if raw_signals is not None:
-            raw_spread, raw_arm = raw_signals
+            raw_leg, raw_arm = raw_signals
+            smoothed_leg = raw_leg if smoothed_leg is None else (
+                SMOOTHING_FACTOR * raw_leg + (1 - SMOOTHING_FACTOR) * smoothed_leg)
+            smoothed_arm = raw_arm if smoothed_arm is None else (
+                SMOOTHING_FACTOR * raw_arm + (1 - SMOOTHING_FACTOR) * smoothed_arm)
 
-            if smoothed_spread is None:
-                smoothed_spread = raw_spread
-                smoothed_arm = raw_arm
+        if state == "calibrating":
+            elapsed = time.time() - calibration_start_time
+            if elapsed < 2.0:
+                calibration_instruction = "Stand still, legs together, arms down..."
             else:
-                smoothed_spread = SMOOTHING_FACTOR * raw_spread + (1 - SMOOTHING_FACTOR) * smoothed_spread
-                smoothed_arm = SMOOTHING_FACTOR * raw_arm + (1 - SMOOTHING_FACTOR) * smoothed_arm
+                calibration_instruction = "Perform 1-2 full jumping jacks, at your normal pace, to calibrate"
 
-            spread = smoothed_spread
-            arm = smoothed_arm
+            if raw_signals is not None:
+                calibration_leg.append(smoothed_leg)
+                calibration_arm.append(smoothed_arm)
+                dbg(f"[calib] leg={smoothed_leg:.2f}  arm={smoothed_arm:.1f}")
 
-            if DEBUG and state in ("closed", "open"):
-                print(f"[{state}] spread={spread:.2f} (HIGH={HIGH_THRESHOLD_SPREAD:.2f} "
-                      f"LOW={LOW_THRESHOLD_SPREAD:.2f})  arm={arm:6.1f}° "
-                      f"(HIGH={HIGH_THRESHOLD_ARM:.1f} LOW={LOW_THRESHOLD_ARM:.1f})")
-
-            # --- Calibration phase ---
-            if state == "calibrating":
-                elapsed = time.time() - calibration_start_time
-                if elapsed < 2.0:
-                    calibration_instruction = "Stand at rest, arms down, feet together..."
+            if elapsed > CALIBRATION_DURATION:
+                if len(calibration_leg) < 2:
+                    transient_message = (
+                        "Calibration failed: patient not detected reliably. Please retry.",
+                        time.time() + 4.0, (0, 0, 255))
+                    leg_min, leg_max = float(ref_leg_spread.min()), float(ref_leg_spread.max())
+                    arm_min, arm_max = float(ref_arm_raise.min()), float(ref_arm_raise.max())
                 else:
-                    calibration_instruction = "Perform ONE full jumping jack to calibrate the system"
+                    leg_min, leg_max = min(calibration_leg), max(calibration_leg)
+                    arm_min, arm_max = min(calibration_arm), max(calibration_arm)
+                    leg_rom = leg_max - leg_min
+                    arm_rom = arm_max - arm_min
+                    dbg(f"Calibration: leg_rom={leg_rom:.2f}  arm_rom={arm_rom:.1f}°", force=True)
 
-                calibration_spread.append(spread)
-                calibration_arm.append(arm)
-
-                if elapsed > CALIBRATION_DURATION:
-                    if len(calibration_spread) < 2:
+                    if leg_rom < 0.15 or arm_rom < 20.0:
                         transient_message = (
-                            "Calibration failed: person not detected reliably. Please retry.",
-                            time.time() + 4.0, (0, 0, 255))
-                        state = "closed"
+                            "Warning: small range of motion detected during calibration "
+                            "(legs and/or arms may be out of frame). Results may be unreliable.",
+                            time.time() + 5.0, (0, 165, 255))
                     else:
-                        obs_spread_min, obs_spread_max = min(calibration_spread), max(calibration_spread)
-                        obs_arm_min, obs_arm_max = min(calibration_arm), max(calibration_arm)
-                        obs_spread_range = max(obs_spread_max - obs_spread_min, 1e-3)
-                        obs_arm_range = max(obs_arm_max - obs_arm_min, 1e-3)
+                        transient_message = (
+                            "Calibration complete", time.time() + 3.0, (0, 200, 0))
+                state = "waiting"
 
-                        HIGH_THRESHOLD_SPREAD = obs_spread_min + 0.3 * obs_spread_range
-                        LOW_THRESHOLD_SPREAD = obs_spread_min + 0.1 * obs_spread_range
-                        HIGH_THRESHOLD_ARM = obs_arm_min + 0.3 * obs_arm_range
-                        LOW_THRESHOLD_ARM = obs_arm_min + 0.1 * obs_arm_range
+        elif leg_min is not None:  # calibration has completed
+            if raw_signals is not None:
+                current_openness = openness(smoothed_leg, smoothed_arm)
 
-                        state = "closed"
-                        if obs_spread_range < 0.15 or obs_arm_range < 15.0:
-                            transient_message = (
-                                "Warning: detected range of motion is very small. "
-                                "Results may be unreliable.",
-                                time.time() + 5.0, (0, 165, 255))
-                        else:
-                            transient_message = (
-                                "Calibration complete", time.time() + 3.0, (0, 200, 0))
+                dbg(f"[{state}] leg={smoothed_leg:.2f}  arm={smoothed_arm:.1f}  "
+                    f"openness={current_openness:.2f}")
 
-            # --- State machine ---
-            elif state == "closed":
-                closed_spread_history.append(spread)
-                closed_arm_history.append(arm)
-                if len(closed_spread_history) > MAX_CLOSED_HISTORY:
-                    closed_spread_history.pop(0)
-                    closed_arm_history.pop(0)
+                if state == "waiting":
+                    can_start = (time.time() - last_rep_end_time) > REFRACTORY_PERIOD
+                    if can_start and current_openness > OPENNESS_HIGH_THRESHOLD:
+                        state = "open"
+                        rep_buffer = [(smoothed_leg, smoothed_arm)]
+                        peak_openness = current_openness
+                        moving_start_time = time.time()
+                        dbg(f"[open] rep started (openness={current_openness:.2f})", force=True)
 
-                # Enter "open" as soon as EITHER signal starts rising --
-                # more responsive than requiring both at once, since one
-                # limb's confidence dip shouldn't delay detecting that the
-                # movement has begun.
-                if spread > HIGH_THRESHOLD_SPREAD or arm > HIGH_THRESHOLD_ARM:
-                    state = "open"
-                    rep_buffer_spread = [spread]
-                    rep_buffer_arm = [arm]
-                    moving_start_time = time.time()
-                    closed_confirm_count = 0
+                elif state == "open":
+                    rep_buffer.append((smoothed_leg, smoothed_arm))
+                    peak_openness = max(peak_openness, current_openness)
 
-            elif state == "open":
-                rep_buffer_spread.append(spread)
-                rep_buffer_arm.append(arm)
+                    timed_out = (time.time() - moving_start_time) > MAX_MOVING_DURATION
+                    peak_passed = current_openness < (peak_openness - PEAK_DROP_MARGIN)
 
-                timed_out = (time.time() - moving_start_time) > MAX_MOVING_DURATION
+                    if timed_out:
+                        last_result_text = "Movement timeout, discarded"
+                        last_color = (150, 150, 150)
+                        dbg("[open] timed out, discarding rep", force=True)
+                        state = "waiting"
+                        rep_buffer = []
+                        last_rep_end_time = time.time()
 
-                if timed_out:
-                    last_result_text = "Movement timeout, discarded"
-                    last_color = (150, 150, 150)
-                    state = "closed"
-                    rep_buffer_spread, rep_buffer_arm = [], []
-                    closed_confirm_count = 0
+                    elif peak_passed:
+                        dbg(f"[open] peak passed (peak={peak_openness:.2f}, "
+                            f"now={current_openness:.2f}) -- finalizing rep", force=True)
+                        state = "waiting"
+                        last_rep_end_time = time.time()
 
-                elif spread < LOW_THRESHOLD_SPREAD and arm < LOW_THRESHOLD_ARM:
-                    # Require BOTH signals back near baseline to confirm
-                    # the patient has actually returned to the closed
-                    # stance, not just that one limb dipped momentarily.
-                    closed_confirm_count += 1
-                    if DEBUG:
-                        print(f"[open] below LOW thresholds "
-                              f"({closed_confirm_count}/{CLOSED_CONFIRM_FRAMES} to confirm closed)")
+                        if len(rep_buffer) >= MIN_REP_FRAMES:
+                            leg_values = [p[0] for p in rep_buffer]
+                            arm_values = [p[1] for p in rep_buffer]
+                            leg_peak = max(leg_values)
+                            arm_peak = max(arm_values)
 
-                    if closed_confirm_count < CLOSED_CONFIRM_FRAMES:
-                        pass
-                    else:
-                        state = "closed"
-                        closed_confirm_count = 0
+                            leg_diff = abs(leg_peak - LEG_SPREAD_TARGET)
+                            arm_diff = abs(arm_peak - ARM_RAISE_TARGET)
 
-                        if len(rep_buffer_spread) >= MIN_REP_FRAMES:
-                            peak_spread = max(rep_buffer_spread)
-                            peak_arm = max(rep_buffer_arm)
-
-                            spread_diff = abs(peak_spread - SPREAD_TARGET)
-                            arm_diff = abs(peak_arm - ARM_TARGET)
-
-                            spread_score = calculate_depth_score(
-                                spread_diff, tolerance=SPREAD_TOLERANCE, falloff=SPREAD_FALLOFF_RANGE)
+                            leg_score = calculate_depth_score(
+                                leg_diff, tolerance=LEG_TOLERANCE, falloff=LEG_FALLOFF)
                             arm_score = calculate_depth_score(
-                                arm_diff, tolerance=DEPTH_TOLERANCE, falloff=DEPTH_FALLOFF_RANGE)
+                                arm_diff, tolerance=ARM_TOLERANCE, falloff=ARM_FALLOFF)
+                            accuracy_pct = (leg_score + arm_score) / 2.0
 
-                            # Combined score: simple average of the two
-                            # component scores. Both are weighted equally
-                            # here for lack of a clinical reason to prefer
-                            # one over the other -- adjust the weighting if
-                            # one aspect (e.g. leg spread for hip mobility)
-                            # matters more for your specific patient.
-                            accuracy_pct = (spread_score + arm_score) / 2.0
-
-                            reached_spread = peak_spread > HIGH_THRESHOLD_SPREAD
-                            reached_arm = peak_arm > HIGH_THRESHOLD_ARM
-                            if not (reached_spread and reached_arm):
-                                weak_part = []
-                                if not reached_spread:
-                                    weak_part.append("legs")
-                                if not reached_arm:
-                                    weak_part.append("arms")
-                                last_result_text = (f"Partial jack ({'/'.join(weak_part)} didn't open fully): "
-                                                     f"{accuracy_pct:.1f}%")
-                            else:
-                                last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"
-
+                            rep_count += 1
+                            last_result_text = f"Rep {rep_count}: {accuracy_pct:.1f}% correct"
                             if accuracy_pct >= 80:
                                 last_color = (0, 200, 0)
                             elif accuracy_pct >= 50:
@@ -395,45 +375,43 @@ while True:
                             else:
                                 last_color = (0, 0, 255)
 
-                            print(f"Rep: peak_spread={peak_spread:.2f} (target={SPREAD_TARGET:.2f}, "
-                                  f"diff={spread_diff:.2f}, score={spread_score:.1f}%)  "
-                                  f"peak_arm={peak_arm:.1f}° (target={ARM_TARGET:.1f}°, "
+                            print(f"Rep {rep_count}: leg_peak={leg_peak:.2f} (target={LEG_SPREAD_TARGET:.2f}, "
+                                  f"diff={leg_diff:.2f}, score={leg_score:.1f}%)  "
+                                  f"arm_peak={arm_peak:.1f}° (target={ARM_RAISE_TARGET:.1f}°, "
                                   f"diff={arm_diff:.1f}°, score={arm_score:.1f}%)  "
-                                  f"-> combined={accuracy_pct:.1f}%")
+                                  f"-> combined score={accuracy_pct:.1f}%")
                         else:
                             last_result_text = "Movement too short, discarded"
                             last_color = (150, 150, 150)
 
-                        rep_buffer_spread, rep_buffer_arm = [], []
-                else:
-                    # At least one signal is still elevated -- not back to
-                    # baseline yet, reset the debounce counter.
-                    closed_confirm_count = 0
+                        rep_buffer = []
     else:
         pass
 
-    state_label = {"calibrating": "CALIBRATING...", "closed": "CLOSED (rest)", "open": "OPEN..."}[state]
-    cv2.putText(annotated_frame, state_label, (20, 40),
+    state_text = {"calibrating": "CALIBRATING...", "waiting": "READY", "open": "JUMPING..."}[state]
+    cv2.putText(annotated_frame, state_text, (20, 40),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
-    cv2.putText(annotated_frame, last_result_text, (20, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.0, last_color, 2, cv2.LINE_AA)
+    cv2.putText(annotated_frame, f"Reps: {rep_count}", (20, 70),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(annotated_frame, last_result_text, (20, 105),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, last_color, 2, cv2.LINE_AA)
 
     if state == "calibrating":
-        cv2.putText(annotated_frame, calibration_instruction, (20, 120),
+        cv2.putText(annotated_frame, calibration_instruction, (20, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
         remaining = max(0.0, CALIBRATION_DURATION - (time.time() - calibration_start_time))
-        cv2.putText(annotated_frame, f"Time remaining: {remaining:0.0f}s", (20, 150),
+        cv2.putText(annotated_frame, f"Time remaining: {remaining:0.0f}s", (20, 170),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2, cv2.LINE_AA)
 
     if transient_message is not None:
         text, expire_at, color = transient_message
         if time.time() < expire_at:
-            cv2.putText(annotated_frame, text, (20, 180),
+            cv2.putText(annotated_frame, text, (20, 200),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
         else:
             transient_message = None
 
-    cv2.imshow('Jumping Jacks Comparison - Press Q to quit', annotated_frame)
+    cv2.imshow('Jumping Jack Comparison - Press Q to quit', annotated_frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
