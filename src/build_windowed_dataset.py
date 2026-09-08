@@ -87,7 +87,7 @@ WINDOW_STRIDE = 10
 
 MIN_WINDOWS_WARNING = 3  # print a warning if a sequence yields fewer windows than this
 VAL_FRACTION = 0.2
-RANDOM_SEED = 42
+RANDOM_SEED = 0
 
 
 def list_all_subjects():

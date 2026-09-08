@@ -18,8 +18,9 @@ Computer Vision project about In-home physical therapy pose estimation system
 
 # 3. for the NN (in order to train it)
     run generate_quality_labels.py
-    run build_windowed_dataset.pyù
-    run train_action_quality_net.py
+    run build_windowed_dataset.py
+    run train_action_quality_net.py #GRU
+    run train_action_quality_tcn.py #TCN
 
 need to put the datasetin a folder on the project root:
 project_root/dataset/MMFi_Datasetgit add .

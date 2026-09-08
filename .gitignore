@@ -16,6 +16,7 @@ jumping_jacks_reference.npy
 quality_labels.csv
 action_quality_dataset.npz
 action_quality_net.pt
+action_quality_tcn.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
