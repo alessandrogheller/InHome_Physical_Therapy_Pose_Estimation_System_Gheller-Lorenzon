@@ -22,4 +22,4 @@ Computer Vision project about In-home physical therapy pose estimation system
     run train_action_quality_net.py
 
 need to put the datasetin a folder on the project root:
-project_root/dataset/MMFi_Dataset
+project_root/dataset/MMFi_Datasetgit add .
