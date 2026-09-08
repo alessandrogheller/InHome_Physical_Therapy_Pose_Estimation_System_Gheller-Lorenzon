@@ -16,4 +16,10 @@ Computer Vision project about In-home physical therapy pose estimation system
     pip install scipy torch pyyaml
     pip install fastdtw
 
-# 3. 
+# 3. for the NN (in order to train it)
+    run generate_quality_labels.py
+    run build_windowed_dataset.pyù
+    run train_action_quality_net.py
+
+need to put the datasetin a folder on the project root:
+project_root/dataset/MMFi_Dataset
