@@ -15,14 +15,19 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(PROJECT_ROOT, 'dataset', 'MMFi_Dataset')
 MODEL_PATH = os.path.join(PROJECT_ROOT, 'yolov8n-pose.pt')
 LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
-
+REFERENCES_DIR = os.path.join(PROJECT_ROOT, 'references')
+GRU_DIR = os.path.join(PROJECT_ROOT, 'GRU')
+TCN_DIR = os.path.join(PROJECT_ROOT, 'TCN')
+os.makedirs(GRU_DIR, exist_ok=True)
+os.makedirs(TCN_DIR, exist_ok=True)
 
 def get_reference_path(action_name):
     """Build a path for an action-specific reference curve, e.g.
     get_reference_path('lunge') -> PROJECT_ROOT/lunge_reference.npy
     Lets different actions (squat, lunge, ...) keep separate reference
     files without overwriting each other."""
-    return os.path.join(PROJECT_ROOT, f'{action_name}_reference.npy')
+    os.makedirs(REFERENCES_DIR, exist_ok=True) # Ensure the references directory exists
+    return os.path.join(REFERENCES_DIR, f'{action_name}_reference.npy')
 
 
 REFERENCE_PATH = get_reference_path('squat')  # kept for backward compatibility with the squat scripts

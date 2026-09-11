@@ -26,6 +26,7 @@ This file lives in <PROJECT_ROOT>/src/realtime_inference_action_quality.py,
 alongside utils.py and keypoint_normalize.py.
 """
 import os
+import sys
 from collections import deque
 
 import cv2
@@ -33,15 +34,19 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from utils import MODEL_PATH, PROJECT_ROOT, select_patient_keypoints
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _SRC_DIR)
+sys.path.insert(0, os.path.join(_SRC_DIR, 'neural_network'))
+
+from utils import MODEL_PATH, PROJECT_ROOT, GRU_DIR, TCN_DIR, select_patient_keypoints
 from keypoint_normalize import frame_is_usable, normalize_frame, FLAT_SIZE
 from train_action_quality_net import ActionQualityNet
 from train_action_quality_tcn import ActionQualityTCN
 
 # --- Which checkpoint to run live ---
 # Point this at either checkpoint to compare them on the same webcam feed.
-#CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, 'action_quality_net.pt')  # GRU
-CHECKPOINT_PATH = os.path.join(PROJECT_ROOT, 'action_quality_tcn.pt')  # TCN
+#CHECKPOINT_PATH = os.path.join(GRU_DIR, 'action_quality_net.pt')  # GRU
+CHECKPOINT_PATH = os.path.join(TCN_DIR, 'action_quality_tcn.pt')  # TCN
 
 # --- Frame-rate mismatch mitigation (see caveat above) ---
 FRAME_SKIP = 1

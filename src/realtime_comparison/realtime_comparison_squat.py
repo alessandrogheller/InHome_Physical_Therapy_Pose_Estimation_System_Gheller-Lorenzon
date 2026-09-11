@@ -1,7 +1,12 @@
 import cv2
 import time
+import sys
+import os
 import numpy as np
+
 from ultralytics import YOLO
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
     MODEL_PATH, REFERENCE_PATH,

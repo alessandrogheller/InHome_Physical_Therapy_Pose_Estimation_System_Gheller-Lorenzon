@@ -16,7 +16,9 @@ import sys
 import csv
 import numpy as np
 
-from utils import PROJECT_ROOT, DATASET_ROOT
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from utils import PROJECT_ROOT, DATASET_ROOT, GRU_DIR, TCN_DIR
 from keypoint_normalize import (
     normalize_sequence, flatten_sequence, mirror_normalized_sequence, FLAT_SIZE,
 )
@@ -55,8 +57,11 @@ MIRROR_MAP = {
     'jumping_jacks': 'jumping_jacks',
 }
 
-QUALITY_LABELS_CSV = os.path.join(PROJECT_ROOT, 'quality_labels.csv')
-OUTPUT_NPZ = os.path.join(PROJECT_ROOT, 'action_quality_dataset.npz')
+QUALITY_LABELS_CSV = os.path.join(GRU_DIR, 'quality_labels.csv')
+OUTPUT_NPZS = [
+    os.path.join(GRU_DIR, 'action_quality_dataset.npz'),
+    os.path.join(TCN_DIR, 'action_quality_dataset.npz'),
+]
 
 # --- Window size rationale --------------------------------------------
 # MMFi recordings last a fixed ~30s per action regardless of exercise (see
@@ -244,14 +249,15 @@ def main():
         print("\nNo training windows were produced at all. Aborting without saving.")
         sys.exit(1)
 
-    np.savez_compressed(
-        OUTPUT_NPZ,
-        class_names=np.array(CLASS_NAMES),
-        window_length=WINDOW_LENGTH,
-        window_stride=WINDOW_STRIDE,
-        **save_kwargs,
-    )
-    print(f"\nSaved windowed dataset to: {OUTPUT_NPZ}")
+    for output_npz in OUTPUT_NPZS:
+        np.savez_compressed(
+            output_npz,
+            class_names=np.array(CLASS_NAMES),
+            window_length=WINDOW_LENGTH,
+            window_stride=WINDOW_STRIDE,
+            **save_kwargs,
+        )
+        print(f"Saved windowed dataset to: {output_npz}")
 
 
 if __name__ == '__main__':

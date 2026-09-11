@@ -24,15 +24,18 @@ Prerequisites (run in order):
 This file lives in <PROJECT_ROOT>/src/train_action_quality_net.py.
 """
 import os
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from utils import PROJECT_ROOT
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DATASET_NPZ = os.path.join(PROJECT_ROOT, 'action_quality_dataset.npz')
-MODEL_PATH = os.path.join(PROJECT_ROOT, 'action_quality_net.pt')
+from utils import GRU_DIR
+
+DATASET_NPZ = os.path.join(GRU_DIR, 'action_quality_dataset.npz')
+MODEL_PATH = os.path.join(GRU_DIR, 'action_quality_net.pt') 
 
 # --- Hyperparameters -----------------------------------------------------
 # Deliberately small: the whole point is that this trains in minutes on a

@@ -21,19 +21,25 @@ This file lives in <PROJECT_ROOT>/src/compare_models.py, alongside
 train_action_quality_net.py and train_action_quality_tcn.py.
 """
 import os
+import sys
 import time
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from utils import PROJECT_ROOT
+_SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _SRC_DIR)
+sys.path.insert(0, os.path.join(_SRC_DIR, 'neural_network'))
+
+from utils import PROJECT_ROOT, GRU_DIR, TCN_DIR
 from train_action_quality_net import ActionQualityNet, WindowDataset as GRUWindowDataset
 from train_action_quality_tcn import ActionQualityTCN, WindowDataset as TCNWindowDataset
 
-DATASET_NPZ = os.path.join(PROJECT_ROOT, 'action_quality_dataset.npz')
-GRU_CHECKPOINT = os.path.join(PROJECT_ROOT, 'action_quality_net.pt')
-TCN_CHECKPOINT = os.path.join(PROJECT_ROOT, 'action_quality_tcn.pt')
+# We pick the dataset from the GRU directory, but both architectures were trained on the same dataset
+DATASET_NPZ = os.path.join(GRU_DIR, 'action_quality_dataset.npz')
+GRU_CHECKPOINT = os.path.join(GRU_DIR, 'action_quality_net.pt')
+TCN_CHECKPOINT = os.path.join(TCN_DIR, 'action_quality_tcn.pt')
 
 # CPU on purpose: the comparison that matters for a non-performant machine
 # is CPU inference speed, since that's what realtime_inference_action_quality.py

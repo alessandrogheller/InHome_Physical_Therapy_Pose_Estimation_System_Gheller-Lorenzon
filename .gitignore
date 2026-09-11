@@ -5,18 +5,12 @@ dataset/
 yolov8n-pose.pt
 
 # Reference curve
-squat_reference.npy
-lunge_left_reference.npy
-lunge_right_reference.npy
-limb_extension_right_reference.npy
-limb_extension_left_reference.npy
-jumping_jacks_reference.npy
+references/
+
 
 # NN files
-quality_labels.csv
-action_quality_dataset.npz
-action_quality_net.pt
-action_quality_tcn.pt
+GRU/
+TCN/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -29,7 +29,11 @@ Normalization steps, per frame:
 This file lives in <PROJECT_ROOT>/src/keypoint_normalize.py, alongside
 utils.py.
 """
+import os
+import sys
 import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
     LEFT_HIP, RIGHT_HIP, LEFT_SHOULDER, RIGHT_SHOULDER, keypoints_are_valid,

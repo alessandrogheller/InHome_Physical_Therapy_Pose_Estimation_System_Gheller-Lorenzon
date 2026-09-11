@@ -33,15 +33,18 @@ This file lives in <PROJECT_ROOT>/src/train_action_quality_tcn.py,
 alongside train_action_quality_net.py.
 """
 import os
+import sys
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from utils import PROJECT_ROOT
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-DATASET_NPZ = os.path.join(PROJECT_ROOT, 'action_quality_dataset.npz')
-MODEL_PATH = os.path.join(PROJECT_ROOT, 'action_quality_tcn.pt')
+from utils import TCN_DIR
+
+DATASET_NPZ = os.path.join(TCN_DIR, 'action_quality_dataset.npz')
+MODEL_PATH = os.path.join(TCN_DIR, 'action_quality_tcn.pt')
 
 # --- Hyperparameters -----------------------------------------------------
 # Kept deliberately small, same spirit as the GRU script: this has to train

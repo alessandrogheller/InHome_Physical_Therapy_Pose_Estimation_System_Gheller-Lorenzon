@@ -2,6 +2,8 @@ import sys
 import os
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils import (
     PROJECT_ROOT, DATASET_ROOT, RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
