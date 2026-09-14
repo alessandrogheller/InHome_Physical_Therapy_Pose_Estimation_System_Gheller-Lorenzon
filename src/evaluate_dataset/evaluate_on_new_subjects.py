@@ -2,24 +2,24 @@
 src/evaluate_dataset/evaluate_on_new_subjects.py
 
 Evaluates the trained GRU and TCN checkpoints (action_quality_net.pt,
-action_quality_tcn.pt -- both in PROJECT_ROOT) on
-eval_action_quality_dataset.npz (new, MMFi-independent subjects). Same
-metrics as src/compare_models.py, just pointed at the eval set instead of
-MMFi's validation split.
+action_quality_tcn.pt) on eval_action_quality_dataset.npz (new,
+MMFi-independent subjects). Same metrics as src/compare_models.py, just
+pointed at the eval set instead of MMFi's validation split.
 
 Run AFTER build_eval_windowed_dataset.py.
+
+CHANGE: instead of assuming every file lives in exactly one hardcoded
+location, this script now SEARCHES a list of plausible directories for
+each required file (checkpoints, eval npz) and uses whichever copy it
+finds first. This means you don't need to manually copy files around if
+they ended up in a slightly different (but still sensible) folder -- e.g.
+running a script from a different working directory, or GRU/TCN being
+created relative to cwd instead of the project root.
 """
 import os
 import sys
 
 # --- Path anchoring -------------------------------------------------
-# This script lives in src/evaluate_dataset/. It needs:
-#   - utils.py                       -> src/
-#   - train_action_quality_net.py    -> src/neural_network/
-#   - train_action_quality_tcn.py    -> src/neural_network/
-# train_action_quality_net.py/tcn.py themselves do `from utils import
-# PROJECT_ROOT`, so src/ must ALSO be on the path for those imports to
-# resolve once we import them from here -- not just src/neural_network/.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 _NN_DIR = os.path.join(_SRC_DIR, 'neural_network')
@@ -35,10 +35,47 @@ from utils import PROJECT_ROOT
 from train_action_quality_net import ActionQualityNet, WindowDataset as GRUWindowDataset
 from train_action_quality_tcn import ActionQualityTCN, WindowDataset as TCNWindowDataset
 
-EVAL_NPZ = os.path.join(PROJECT_ROOT, 'eval_action_quality_dataset.npz')
-GRU_CHECKPOINT = os.path.join(PROJECT_ROOT,'GRU', 'action_quality_net.pt')
-TCN_CHECKPOINT = os.path.join(PROJECT_ROOT,'TCN', 'action_quality_tcn.pt')
 DEVICE = torch.device('cpu')
+
+# --- Robust file lookup ----------------------------------------------
+# Every plausible base directory a file might have ended up in, in order
+# of preference. Using a set() first to avoid searching the same
+# directory twice if some of these coincide.
+_CWD = os.getcwd()
+_CANDIDATE_BASE_DIRS = list(dict.fromkeys([
+    PROJECT_ROOT,                                   # <root>/
+    os.path.join(PROJECT_ROOT, 'src'),              # <root>/src/
+    _SRC_DIR,                                        # src/ (same as above, kept for clarity)
+    _THIS_DIR,                                        # src/evaluate_dataset/
+    _CWD,                                             # wherever the script was launched from
+]))
+
+
+def find_file(filename, extra_subdirs=('',)):
+    """Search for `filename` under each candidate base directory, also
+    trying each of `extra_subdirs` (e.g. 'GRU', 'TCN') under every base.
+    Returns the first existing path found, or None."""
+    checked = []
+    for base in _CANDIDATE_BASE_DIRS:
+        for sub in extra_subdirs:
+            candidate = os.path.join(base, sub, filename) if sub else os.path.join(base, filename)
+            checked.append(candidate)
+            if os.path.exists(candidate):
+                return candidate, checked
+    return None, checked
+
+
+def require_file(filename, extra_subdirs=('',), hint=""):
+    path, checked = find_file(filename, extra_subdirs)
+    if path is None:
+        print(f"ERROR: could not find '{filename}'. Looked in:")
+        for c in checked:
+            print(f"  - {c}")
+        if hint:
+            print(hint)
+        sys.exit(1)
+    print(f"Found {filename} -> {path}")
+    return path
 
 
 def load_gru(path):
@@ -88,23 +125,26 @@ def evaluate(model, loader, num_classes):
 
 
 def main():
-    if not os.path.exists(EVAL_NPZ):
-        print(f"ERROR: {EVAL_NPZ} not found. Run build_eval_windowed_dataset.py first.")
-        return
-    missing = [p for p in (GRU_CHECKPOINT, TCN_CHECKPOINT) if not os.path.exists(p)]
-    if missing:
-        print("ERROR: missing checkpoint(s):")
-        for p in missing:
-            print(f"  {p}")
-        return
+    eval_npz_path = require_file(
+        'eval_action_quality_dataset.npz',
+        hint="Run build_eval_windowed_dataset.py first."
+    )
+    gru_ckpt_path = require_file(
+        'action_quality_net.pt', extra_subdirs=('GRU', ''),
+        hint="Run train_action_quality_net.py first (or check it wasn't saved under a different folder)."
+    )
+    tcn_ckpt_path = require_file(
+        'action_quality_tcn.pt', extra_subdirs=('TCN', ''),
+        hint="Run train_action_quality_tcn.py first (or check it wasn't saved under a different folder)."
+    )
 
-    data = np.load(EVAL_NPZ, allow_pickle=True)
+    data = np.load(eval_npz_path, allow_pickle=True)
     class_names = list(data['class_names'])
     num_classes = len(class_names)
-    print(f"Eval windows: {data['X'].shape[0]}\n")
+    print(f"\nEval windows: {data['X'].shape[0]}\n")
 
-    gru_model, _ = load_gru(GRU_CHECKPOINT)
-    tcn_model, _ = load_tcn(TCN_CHECKPOINT)
+    gru_model, _ = load_gru(gru_ckpt_path)
+    tcn_model, _ = load_tcn(tcn_ckpt_path)
 
     gru_ds = GRUWindowDataset(data['X'], data['y_class'], data['y_score'])
     tcn_ds = TCNWindowDataset(data['X'], data['y_class'], data['y_score'])
