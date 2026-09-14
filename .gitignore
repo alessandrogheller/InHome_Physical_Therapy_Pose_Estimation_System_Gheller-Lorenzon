@@ -1,5 +1,6 @@
 # Dataset
 dataset/
+eval_dataset/
 
 # YOLOv8 model weights
 yolov8n-pose.pt
@@ -11,6 +12,10 @@ references/
 # NN files
 GRU/
 TCN/
+eval_action_quality_dataset.npz
+eval_quality_labels.csv
+quality_labels.csv
+quality_targets.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

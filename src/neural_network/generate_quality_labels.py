@@ -21,17 +21,26 @@ at ALL 4 environments (all ~40 subjects), since a neural network benefits
 from more subjects/body-types/camera-setups to learn from, whereas the
 original scripts were only meant as a quick per-environment sanity check.
 
+ALSO WRITES quality_targets.json: the empirical target value(s) used for
+each exercise (e.g. DEPTH_TARGET for squat/lunge, resting/extension
+targets for limb extension, leg/arm targets+tolerances for jumping jacks).
+This is the file that lets evaluate_dataset/score_eval_subjects.py score
+brand-new (non-MMFi) subjects against the EXACT SAME targets the networks
+were trained on, instead of recomputing targets on the new, small eval
+population (which would defeat the point of testing generalization).
+
 Run this BEFORE build_windowed_dataset.py.
 """
 import os
 import sys
 import csv
+import json
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
-    PROJECT_ROOT, DATASET_ROOT, GRU_DIR, TCN_DIR,
+    PROJECT_ROOT, DATASET_ROOT,
     LEFT_HIP, LEFT_KNEE, LEFT_ANKLE, RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE,
     LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST, RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
@@ -40,16 +49,19 @@ from utils import (
 sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
-OUTPUT_CSVS = [
-    os.path.join(GRU_DIR, 'quality_labels.csv'),
-    os.path.join(TCN_DIR, 'quality_labels.csv'),
-]
+OUTPUT_CSV = os.path.join(PROJECT_ROOT, 'quality_labels.csv')
+TARGETS_JSON = os.path.join(PROJECT_ROOT, 'quality_targets.json')
 
 # --- Action definitions -----------------------------------------------
 # name -> (MMFi action code, (hip, knee, ankle) OR (shoulder, elbow, wrist)
 # joint triplet, scorer function to use). Squat/lunges use the leg
 # triplet; limb extensions use the arm triplet. Jumping jacks are handled
 # separately below since it needs two signals, not one angle.
+#
+# Every scorer function below now returns (scores_dict, target_info_dict)
+# instead of just scores_dict, so the empirical target(s) it computed can
+# be captured and saved to TARGETS_JSON -- not just used internally and
+# discarded.
 def score_lunge(subject_angles):
     """Empirical target = mean of subjects' own minimum knee angle, same
     as evaluate_dataset_fixed_targets_lunge_left.py / _right.py."""
@@ -59,7 +71,8 @@ def score_lunge(subject_angles):
     for subject, angles in subject_angles.items():
         depth_diff = abs(float(angles.min()) - depth_target)
         scores[subject] = calculate_depth_score(depth_diff)
-    return scores
+    target_info = {'depth_target': depth_target}
+    return scores, target_info
 
 
 def score_limb_extension(subject_angles):
@@ -75,7 +88,8 @@ def score_limb_extension(subject_angles):
         resting_score = calculate_depth_score(resting_diff)
         extension_score = calculate_depth_score(extension_diff)
         scores[subject] = (resting_score + extension_score) / 2.0
-    return scores
+    target_info = {'resting_target': resting_target, 'extension_target': extension_target}
+    return scores, target_info
 
 
 ANGLE_ACTIONS = {
@@ -163,7 +177,10 @@ def jumping_jack_signals(keypoints_seq):
 
 def score_jumping_jacks(subject_signals):
     """Same dual-signal, population-relative scoring as
-    evaluate_dataset_fixed_targets_jumping_jacks.py."""
+    evaluate_dataset_fixed_targets_jumping_jacks.py. Returns
+    (scores_dict, target_info_dict) like the other scorers, so the
+    leg/arm targets AND their tolerance/falloff (needed to reproduce
+    calculate_depth_score exactly on new subjects) are all captured."""
     leg_peaks = [float(np.percentile(leg, 95)) for leg, arm in subject_signals.values()]
     arm_peaks = [float(np.percentile(arm, 95)) for leg, arm in subject_signals.values()]
     leg_target, arm_target = float(np.mean(leg_peaks)), float(np.mean(arm_peaks))
@@ -178,7 +195,13 @@ def score_jumping_jacks(subject_signals):
         leg_score = calculate_depth_score(abs(leg_peak - leg_target), tolerance=leg_tol, falloff=leg_fall)
         arm_score = calculate_depth_score(abs(arm_peak - arm_target), tolerance=arm_tol, falloff=arm_fall)
         scores[subject] = (leg_score + arm_score) / 2.0
-    return scores
+
+    target_info = {
+        'leg_target': leg_target, 'arm_target': arm_target,
+        'leg_tolerance': leg_tol, 'leg_falloff': leg_fall,
+        'arm_tolerance': arm_tol, 'arm_falloff': arm_fall,
+    }
+    return scores, target_info
 
 
 def main():
@@ -187,6 +210,7 @@ def main():
 
     database = MMFi_Database(DATASET_ROOT)
     rows = []  # (subject, action_name, score)
+    all_targets = {}  # action_name -> dict of empirical target values
 
     for action_name, (action_code, joints, scorer) in ANGLE_ACTIONS.items():
         print(f"=== {action_name} ({action_code}) ===")
@@ -205,10 +229,11 @@ def main():
             print(f"  No subject usable for {action_name}, skipping this action.\n")
             continue
 
-        scores = scorer(subject_angles)
+        scores, target_info = scorer(subject_angles)
+        all_targets[action_name] = target_info
         for subject, score in scores.items():
             rows.append((subject, action_name, score))
-        print(f"  Scored {len(scores)} subjects.\n")
+        print(f"  Scored {len(scores)} subjects.  Targets: {target_info}\n")
 
     # Jumping jacks needs its own (dual-signal) extraction path.
     print(f"=== {JUMPING_JACKS_ACTION_NAME} ({JUMPING_JACKS_ACTION_CODE}) ===")
@@ -224,10 +249,11 @@ def main():
         subject_signals[subject] = (leg, arm)
 
     if len(subject_signals) > 0:
-        scores = score_jumping_jacks(subject_signals)
+        scores, target_info = score_jumping_jacks(subject_signals)
+        all_targets[JUMPING_JACKS_ACTION_NAME] = target_info
         for subject, score in scores.items():
             rows.append((subject, JUMPING_JACKS_ACTION_NAME, score))
-        print(f"  Scored {len(scores)} subjects.\n")
+        print(f"  Scored {len(scores)} subjects.  Targets: {target_info}\n")
     else:
         print("  No subject usable for jumping_jacks, skipping this action.\n")
 
@@ -235,12 +261,15 @@ def main():
         print("No scores could be computed for any subject/action. Aborting.")
         sys.exit(1)
 
-    for output_csv in OUTPUT_CSVS:
-        with open(output_csv, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['subject', 'action', 'score'])
-            writer.writerows(rows)
-        print(f"Saved {len(rows)} (subject, action, score) rows to: {output_csv}")
+    with open(OUTPUT_CSV, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['subject', 'action', 'score'])
+        writer.writerows(rows)
+    print(f"Saved {len(rows)} (subject, action, score) rows to: {OUTPUT_CSV}")
+
+    with open(TARGETS_JSON, 'w') as f:
+        json.dump(all_targets, f, indent=2)
+    print(f"Saved empirical targets to: {TARGETS_JSON}")
 
 
 if __name__ == '__main__':
