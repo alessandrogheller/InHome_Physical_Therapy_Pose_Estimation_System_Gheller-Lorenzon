@@ -10,6 +10,14 @@ import sys
 import csv
 import numpy as np
 
+# --- Path anchoring -------------------------------------------------
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_SRC_DIR = os.path.dirname(_THIS_DIR)
+_NN_DIR = os.path.join(_SRC_DIR, 'neural_network')
+for _p in (_SRC_DIR, _NN_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+        
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import PROJECT_ROOT
