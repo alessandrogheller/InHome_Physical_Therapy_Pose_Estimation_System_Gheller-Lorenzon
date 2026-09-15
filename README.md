@@ -25,6 +25,22 @@ Computer Vision project about In-home physical therapy pose estimation system
 need to put the datasetin a folder on the project root:
 project_root/dataset/MMFi_Datasetgit add .
 
+# # per creare l'eval dataset:
+
+    # una tantum, dopo aver aggiornato generate_quality_labels.py:
+    python generate_quality_labels.py          # -> quality_targets.json
+
+    # per ogni video registrato:
+    python extract_keypoints_from_video.py video_squat_S_eval01.mp4 S_eval01 squat
+    python extract_keypoints_from_video.py video_lunge_left_S_eval01.mp4 S_eval01 lunge_left
+    ... (ripetuto per tutti gli esercizi/soggetti)
+
+    # poi:
+    python score_eval_subjects.py              # -> eval_quality_labels.csv
+    python build_eval_windowed_dataset.py       # -> eval_action_quality_dataset.npz
+    python evaluate_on_new_subjects.py          # metriche finali
+    python plot_three_evaluations.py three_methods_comparison.csv
+
 # InHome Physical Therapy Pose Estimation System
 
 A real-time pose estimation system for home-based physical therapy. The system evaluates the execution quality of six rehabilitation exercises using a standard webcam, without requiring wearable sensors.
