@@ -16,6 +16,9 @@ eval_action_quality_dataset.npz
 eval_quality_labels.csv
 quality_labels.csv
 quality_targets.json
+three_methods_comparison.csv
+
+comparison_plots/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
