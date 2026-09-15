@@ -1,17 +1,13 @@
+"""Launch the exercise reference-extraction and real-time comparison tools."""
+
 import sys
 import os
 import subprocess
 import tkinter as tk
 from tkinter import messagebox
 
-# Exercise Mapping Configuration:
-# Map each exercise name to its corresponding reference extraction script,
-# real-time comparison script, .npy reference file, and a short emoji/text
-# "icon" shown on its button. If you have real icon image files, put them
-# e.g. under <PROJECT_ROOT>/assets/icons/<name>.png and set "icon_path"
-# instead -- see load_icon() below, which falls back to the emoji if the
-# file isn't found (so this works with zero setup and can be upgraded
-# later without changing the rest of the logic).
+# Map each exercise to its extraction script, comparison script, reference,
+# and optional icon.
 EXERCISES = {
     "Squat": {
         "extractor_script": os.path.join("src", "reference_extraction", "reference_extraction_squat.py"),
@@ -89,8 +85,7 @@ class PhysicalTherapyApp:
         )
         subtitle_label.pack(pady=(0, 15))
 
-        # --- Icon grid: one click = extraction + comparison, no separate
-        # "start" step anymore. ---
+        # Each button runs extraction and then starts real-time comparison.
         grid_frame = tk.Frame(root, bg="#2c3e50")
         grid_frame.pack(pady=5)
 
@@ -119,8 +114,7 @@ class PhysicalTherapyApp:
         exit_btn.pack(pady=5)
 
     def _load_icon(self, icon_path):
-        """Load a PNG/GIF as a Tkinter PhotoImage if it exists, else None
-        (caller falls back to the emoji label)."""
+        """Load an icon if available; otherwise let the caller use an emoji."""
         full_path = os.path.join(PROJECT_ROOT, icon_path)
         if not os.path.exists(full_path):
             return None
@@ -150,9 +144,7 @@ class PhysicalTherapyApp:
                 command=lambda name=ex_name: self.start_exercise(name)
             )
         else:
-            # No image file found yet -- emoji-on-button fallback, so the
-            # UI works out of the box. Drop real PNGs in assets/icons/ to
-            # upgrade any button without touching this code.
+            # Use the configured emoji when no image file is available.
             btn = tk.Button(
                 cell,
                 text=ex_info["emoji"],
@@ -179,21 +171,7 @@ class PhysicalTherapyApp:
         label.pack(pady=(4, 0))
 
     def _bring_window_to_front(self):
-        """deiconify() alone restores the window but does not reliably
-        give it focus/raise it above other windows on every platform.
-
-        Two things were missing before:
-          1. An explicit update() between each step -- without it,
-             Tkinter can batch/skip the intermediate state changes and
-             lift() ends up acting on a window that hasn't actually been
-             restored yet.
-          2. On Windows specifically, there's an OS-level "foreground lock"
-             that stops background processes from stealing focus outright
-             -- attributes('-topmost', True) alone can be silently ignored.
-             SetForegroundWindow (via ctypes) is the documented way around
-             that; it's wrapped in a try/except since it's Windows-only and
-             this script should still work fine on Linux/Mac without it.
-        """
+        """Restore the launcher and bring it to the foreground."""
         self.root.deiconify()
         self.root.state('normal')
         self.root.update()
@@ -211,9 +189,7 @@ class PhysicalTherapyApp:
             except Exception as e:
                 print(f"[WARNING] SetForegroundWindow failed: {e}")
 
-        # Release topmost shortly after -- keeping it permanently would
-        # pin the launcher above every other window forever, not just
-        # bring it forward once.
+        # Release topmost after the window has been restored.
         self.root.after(300, lambda: self.root.attributes('-topmost', False))
 
     def start_exercise(self, ex_name):
@@ -227,7 +203,7 @@ class PhysicalTherapyApp:
         comparison = ex_info["comparison_script"]
 
         try:
-            # 1. Reference Extraction Stage
+            # Build the selected exercise reference curve.
             self.status_label.config(text=f"Updating reference for: {ex_name}...", fg="#f1c40f")
             self.root.update_idletasks()
 
@@ -237,7 +213,7 @@ class PhysicalTherapyApp:
             else:
                 print(f"[WARNING] Extraction script '{extractor}' not found. Using existing reference if available.")
 
-            # 2. Real-time Comparison Stage
+            # Start the real-time comparison tool.
             self.status_label.config(text="Running real-time evaluation...", fg="#2ecc71")
             self.root.update_idletasks()
 

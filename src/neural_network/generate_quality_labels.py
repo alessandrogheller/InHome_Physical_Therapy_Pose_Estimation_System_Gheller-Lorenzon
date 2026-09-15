@@ -1,35 +1,9 @@
 """
-Collects, for every subject and every one of the 6 exercises this project
-handles, the SAME "quality" score that evaluate_dataset_fixed_targets_*.py
-already computes and prints -- squat's fixed 95° clinical target, the
-lunges'/limb-extensions'/jumping-jacks' data-driven empirical targets --
-and writes them all into one CSV file:
+Generate subject-level quality labels for the six supported exercises.
 
-    subject,action,score
-
-This CSV is the (weak, subject-level) label used later by
-build_windowed_dataset.py to train the neural network's quality-scoring
-head. It does NOT introduce any new notion of "correct execution" -- it's
-exactly the same heuristic, data-driven scoring already used and
-documented (with the same caveats) in the individual evaluate_dataset_*.py
-scripts, just gathered into a file instead of only being printed to the
-terminal.
-
-IMPORTANT DIFFERENCE FROM THE ORIGINAL evaluate_dataset_*.py SCRIPTS: those
-scripts only look at ENVIRONMENT = 'E01' (10 subjects). This script looks
-at ALL 4 environments (all ~40 subjects), since a neural network benefits
-from more subjects/body-types/camera-setups to learn from, whereas the
-original scripts were only meant as a quick per-environment sanity check.
-
-ALSO WRITES quality_targets.json: the empirical target value(s) used for
-each exercise (e.g. DEPTH_TARGET for squat/lunge, resting/extension
-targets for limb extension, leg/arm targets+tolerances for jumping jacks).
-This is the file that lets evaluate_dataset/score_eval_subjects.py score
-brand-new (non-MMFi) subjects against the EXACT SAME targets the networks
-were trained on, instead of recomputing targets on the new, small eval
-population (which would defeat the point of testing generalization).
-
-Run this BEFORE build_windowed_dataset.py.
+The script computes the same heuristic scores used by the evaluation scripts
+for all MMFi subjects, then saves both the scores and the empirical targets
+needed by later training and evaluation steps.
 """
 import os
 import sys
@@ -147,6 +121,7 @@ def load_sequence(database, subject, action_code):
 
 
 def angle_series(keypoints_seq, joints):
+    """Extract the valid joint angle from every frame in a sequence."""
     hip_i, knee_i, ankle_i = joints
     angles = []
     for frame_kp in keypoints_seq:
@@ -161,6 +136,7 @@ def euclidean(a, b):
 
 
 def jumping_jack_signals(keypoints_seq):
+    """Extract normalized leg-spread and arm-raise signals for each frame."""
     leg_spread, arm_raise = [], []
     for frame_kp in keypoints_seq:
         if not keypoints_are_valid(frame_kp, None, JUMPING_JACKS_REQUIRED_KEYPOINTS):
@@ -205,6 +181,8 @@ def score_jumping_jacks(subject_signals):
 
 
 def main():
+    # Use all available environments so the labels cover the complete training
+    # population instead of only the first MMFi environment.
     subjects = list_all_subjects()
     print(f"Found {len(subjects)} subjects across all environments.\n")
 
@@ -212,6 +190,7 @@ def main():
     rows = []  # (subject, action_name, score)
     all_targets = {}  # action_name -> dict of empirical target values
 
+    # Compute scores for exercises represented by a single joint-angle signal.
     for action_name, (action_code, joints, scorer) in ANGLE_ACTIONS.items():
         print(f"=== {action_name} ({action_code}) ===")
         subject_angles = {}
@@ -235,7 +214,7 @@ def main():
             rows.append((subject, action_name, score))
         print(f"  Scored {len(scores)} subjects.  Targets: {target_info}\n")
 
-    # Jumping jacks needs its own (dual-signal) extraction path.
+    # Jumping jacks uses two signals, so it follows a separate scoring path.
     print(f"=== {JUMPING_JACKS_ACTION_NAME} ({JUMPING_JACKS_ACTION_CODE}) ===")
     subject_signals = {}
     for subject in subjects:
@@ -261,12 +240,15 @@ def main():
         print("No scores could be computed for any subject/action. Aborting.")
         sys.exit(1)
 
+    # Save one quality label for each valid subject/action pair.
     with open(OUTPUT_CSV, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['subject', 'action', 'score'])
         writer.writerows(rows)
     print(f"Saved {len(rows)} (subject, action, score) rows to: {OUTPUT_CSV}")
 
+    # Save the targets used to compute the scores so new subjects can be scored
+    # against the same reference values later.
     with open(TARGETS_JSON, 'w') as f:
         json.dump(all_targets, f, indent=2)
     print(f"Saved empirical targets to: {TARGETS_JSON}")

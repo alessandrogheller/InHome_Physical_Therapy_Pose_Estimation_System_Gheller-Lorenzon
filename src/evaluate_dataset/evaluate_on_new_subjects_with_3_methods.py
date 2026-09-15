@@ -1,59 +1,10 @@
 """
-src/evaluate_dataset/evaluate_three_methods.py
-
-Runs all THREE quality-assessment methods this project implements on the
-SAME set of independent subjects/videos -- the ones you already extracted
-into an eval folder with extract_keypoints_from_video.py -- and reports
-their scores side by side:
-
-  1. Rule-based / geometric method  (same logic as score_eval_subjects.py,
-                                      scored against quality_targets.json)
-  2. GRU neural network             (GRU/action_quality_net.pt)
-  3. TCN neural network             (TCN/action_quality_tcn.pt)
-
-For every subject/exercise video found in the eval folder, each method
-independently produces a 0-100 quality score. The two neural methods also
-produce a predicted exercise label, which is checked against the ground
-truth implied by the folder name (the exercise sub-folder itself, e.g.
-"squat", "lunge_left", ...).
-
-Output:
-  - one row per (subject, exercise) printed to the terminal as it's scored
-  - a CSV report (three_methods_comparison.csv) with one row per video
-  - a summary at the end: per-method score statistics, GRU/TCN
-    classification accuracy against the ground-truth exercise label, and
-    pairwise agreement between the three methods (Pearson correlation +
-    mean absolute difference of their scores), so you can see e.g. whether
-    the two neural methods agree with each other more than with the
-    rule-based baseline.
-
-Nothing here is recomputed from scratch: targets come from
-quality_targets.json (generate_quality_labels.py) and the two checkpoints
-come from train_action_quality_net.py / train_action_quality_tcn.py. This
-script only ties the three together on the same input.
-
-Prerequisites (run in order, if not already done):
-  1. extract_keypoints_from_video.py  (once per video, fills the eval folder)
-  2. generate_quality_labels.py       -> quality_targets.json
-  3. train_action_quality_net.py      -> GRU/action_quality_net.pt
-  4. train_action_quality_tcn.py      -> TCN/action_quality_tcn.pt
-
-Usage:
-    python evaluate_three_methods.py [eval_dataset_root]
-
-If eval_dataset_root is omitted, it defaults to <PROJECT_ROOT>/eval_dataset
-(the same default extract_keypoints_from_video.py writes to). Point it at
-any folder with the same layout:
-
-    <eval_dataset_root>/<subject_id>/<exercise_name>/keypoints.npy
-    <eval_dataset_root>/<subject_id>/<exercise_name>/confidences.npy   (optional)
-
-where <exercise_name> is one of: squat, lunge_left, lunge_right,
-limb_extension_left, limb_extension_right, jumping_jacks.
-
-This file lives in <PROJECT_ROOT>/src/evaluate_dataset/, alongside
-score_eval_subjects.py and evaluate_on_new_subjects.py, which this script
-overlaps with in purpose but combines into one direct 3-way comparison.
+src/evaluate_dataset/evaluate_on_new_subjects_with_3_methods.py
+Compare the three quality-assessment methods on the same evaluation videos:
+rule-based scoring, GRU, and TCN. Each subject/exercise pair is scored
+independently, and the neural models also predict the exercise label from the
+folder name. Results are printed and saved to a CSV report for side-by-side
+comparison.
 """
 import os
 import sys
@@ -62,9 +13,6 @@ import json
 import numpy as np
 
 # --- Path anchoring -------------------------------------------------
-# Same pattern used by the other evaluate_dataset/ scripts: add src/ and
-# src/neural_network/ to sys.path explicitly so this works regardless of
-# the current working directory it's launched from.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 _NN_DIR = os.path.join(_SRC_DIR, 'neural_network')
@@ -86,15 +34,11 @@ from train_action_quality_tcn import ActionQualityTCN
 
 DEVICE = torch.device('cpu')  # evaluation only, no need for GPU here
 
-# Must match build_windowed_dataset.py / build_eval_windowed_dataset.py
-# exactly -- this is the class-index mapping the trained checkpoints
-# expect their classification head's outputs to follow.
+# --- Configuration ----------------------------------------------------
 CLASS_NAMES = ['squat', 'lunge_left', 'lunge_right',
                'limb_extension_left', 'limb_extension_right', 'jumping_jacks']
 
-# Same stride used to build the training windows (build_windowed_dataset.py).
-# Not stored in the checkpoint, so it's hardcoded here too, exactly like
-# build_eval_windowed_dataset.py already does.
+
 WINDOW_STRIDE = 10
 
 TARGETS_JSON = os.path.join(PROJECT_ROOT, 'quality_targets.json')
@@ -102,9 +46,9 @@ DEFAULT_EVAL_ROOT = os.path.join(PROJECT_ROOT, 'eval_dataset')
 OUTPUT_CSV = os.path.join(PROJECT_ROOT, 'three_methods_comparison.csv')
 
 # --- Robust checkpoint lookup -----------------------------------------
-# A trained checkpoint could plausibly end up in a few different places
-# depending on where each training script was launched from -- same
-# reasoning/implementation as evaluate_on_new_subjects.py.
+# A trained checkpoint may live in a few different locations depending on where
+# the training scripts were launched from. We search a small set of likely roots
+# to avoid failing only because the current working directory differs.
 _CWD = os.getcwd()
 _CANDIDATE_BASE_DIRS = list(dict.fromkeys([
     PROJECT_ROOT,
@@ -116,6 +60,8 @@ _CANDIDATE_BASE_DIRS = list(dict.fromkeys([
 
 
 def find_file(filename, extra_subdirs=('',)):
+    # Search a few likely project roots and optional subfolders until we locate
+    # the checkpoint or target file required by the evaluator.
     checked = []
     for base in _CANDIDATE_BASE_DIRS:
         for sub in extra_subdirs:
@@ -127,6 +73,8 @@ def find_file(filename, extra_subdirs=('',)):
 
 
 def require_file(filename, extra_subdirs=('',), hint=""):
+    # Fail fast and print the exact paths that were checked when a required file
+    # is missing, so the user can immediately see what needs to be generated.
     path, checked = find_file(filename, extra_subdirs)
     if path is None:
         print(f"ERROR: could not find '{filename}'. Looked in:")
@@ -271,9 +219,8 @@ def neural_score(model, class_names, window_length, normalized_flat):
 
 # --- Correlation / agreement helpers ------------------------------------
 def pearson_and_mae(a, b):
-    """a, b: same-length lists of paired scores (already filtered to rows
-    where both are available). Returns (pearson_r, mean_abs_diff), or
-    (None, None) if there are fewer than 2 paired points."""
+    # Compare method agreement for the same videos by measuring linear correlation
+    # and the average absolute score difference across paired predictions.
     if len(a) < 2:
         return None, None
     a_arr, b_arr = np.array(a, dtype=float), np.array(b, dtype=float)
@@ -286,6 +233,9 @@ def pearson_and_mae(a, b):
 
 
 def main():
+    # Main entry point: load the evaluation set, load all three scoring methods,
+    # score every subject/exercise pair, and print both the per-video and the
+    # aggregate comparison report.
     eval_root = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_EVAL_ROOT
     eval_root = os.path.abspath(eval_root)
     if not os.path.isdir(eval_root):

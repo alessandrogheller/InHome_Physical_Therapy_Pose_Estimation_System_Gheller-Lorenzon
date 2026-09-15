@@ -1,3 +1,13 @@
+"""
+src/evaluate_dataset/evaluate_dataset_fixed_targets_limb_extension_left.py
+This script evaluates the left-arm limb-extension movement by extracting the
+elbow-angle trajectory from MM-Fi reference sequences. For each subject, it
+computes the minimum and maximum elbow angles, estimates empirical resting and
+extension targets from the dataset, and scores each motion by comparing both
+signals against those targets. The goal is to assess whether each sequence
+closely matches a realistic extension-from-rest pattern rather than a single
+peak angle alone.
+"""
 import sys
 import os
 import numpy as np
@@ -14,32 +24,24 @@ sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-ACTION = 'A07'  # A07 = Limb extension (left arm), rehabilitation activity (MMFi README)
+ACTION = 'A07'  # A07 = Limb extension (left arm)
 ENVIRONMENT = 'E01'
 
 # --- Target angles ---
-# IMPORTANT: unlike the squat (which uses a fixed clinical target of 95deg),
-# there is no published clinical target angle for either the resting/flexed
-# elbow position or the fully-extended elbow position of a limb extension.
-# Both RESTING_TARGET and EXTENSION_TARGET below are estimated empirically
-# as the mean of subjects' own minimum (resting) and maximum (extended)
-# elbow angle -- i.e. "what people in this dataset actually did", not a
-# validated clinical goal. Treat these as data-driven placeholders; replace
-# them if a physiotherapist/supervisor provides real reference values.
+# Unlike the squat, which uses a fixed clinical target angle, there is no
+# published reference value for the elbow angles of a limb-extension movement.
+# Therefore, RESTING_TARGET and EXTENSION_TARGET are estimated empirically from
+# the dataset itself: the mean of each subject's minimum and maximum elbow angle.
+# These are data-driven placeholders, not validated clinical targets.
 #
-# WHY BOTH ARE SCORED (not just the extension peak): if only the peak
-# extension were scored, a subject who simply holds their arm near-extended
-# for the whole clip -- never actually returning to a resting/flexed
-# position between reps -- would score ~100% despite not performing a real
-# extension-FROM-rest movement. Scoring the resting angle too, and
-# averaging the two scores, means a repetition only scores well if it both
-# starts/ends near a real resting flexion AND reaches a real extension.
-# This mirrors why the squat/lunge scripts also check the "standing" angle
-# in addition to depth, instead of scoring depth alone.
+# Both signals are scored instead of only the maximum extension because a subject
+# who keeps the arm extended for the entire sequence would otherwise look perfect,
+# even if they never return to a realistic resting/flexed position between reps.
+# A good execution must both start/end near a resting angle and reach a real
+# extension, which is the same logic used by the squat and lunge pipelines.
 #
-# DEPTH_TOLERANCE / falloff are imported from utils.py so scoring stays
-# consistent with the rest of the pipeline (same shape used for the
-# squat/lunge depth score), applied here to both signals.
+# DEPTH_TOLERANCE and the falloff curve are imported from utils.py so the score
+# remains consistent with the rest of the project and is applied to both metrics.
 
 # Auto-detect subject folders inside the environment
 environment_path = os.path.join(DATASET_ROOT, ENVIRONMENT)
@@ -53,8 +55,9 @@ database = MMFi_Database(DATASET_ROOT)
 
 
 def load_subject_angles(subject):
-    """Load one subject's A07 sequence and return the filtered left-elbow
-    angle over time, or None if the subject/action could not be loaded."""
+    # Extract the elbow-angle trajectory for the left arm from the reference video.
+    # Invalid or missing joints are discarded so the motion signal reflects only
+    # usable pose estimates.
     try:
         data_form = {subject: [ACTION]}
         dataset = MMFi_Dataset(
@@ -90,7 +93,10 @@ def load_subject_angles(subject):
     return np.array(angles)
 
 
-# --- Pass 1: load all subjects, compute the empirical resting/extension targets ---
+# --- Pass 1: load all subjects and estimate the empirical resting/extension targets ---
+# The dataset-level reference is computed as the average of each subject's own
+# minimum and maximum elbow angle, which captures the range normally reached by
+# healthy repetitions in this dataset.
 subject_angles = {}
 for subject in SUBJECTS:
     angles = load_subject_angles(subject)
@@ -112,7 +118,9 @@ print(f"Empirical EXTENSION_TARGET (mean of subjects' maximum elbow angle) = {EX
 print("NOTE: these are data-driven placeholders, not validated clinical targets "
       "(unlike the squat's manually-set 95°). Replace them if you obtain a clinical reference.\n")
 
-# --- Pass 2: score each subject against BOTH empirical targets ---
+# --- Pass 2: score each subject against both empirical targets ---
+# A movement is considered correct only when both the resting angle and the
+# extension angle are close to the dataset-derived target range.
 results = []
 for subject, angles in subject_angles.items():
     subject_resting = float(angles.min())

@@ -1,36 +1,8 @@
 """
-Second method for comparison: a Temporal Convolutional Network (TCN / 1D-CNN)
-instead of the GRU used in train_action_quality_net.py.
+Train a Temporal Convolutional Network to classify exercises and predict quality.
 
-WHY THIS IS A FAIR COMPARISON, NOT JUST A DIFFERENT SCRIPT:
-- Same input: the exact same action_quality_dataset.npz produced by
-  build_windowed_dataset.py (34-dim normalized keypoints, WINDOW_LENGTH
-  frames per window).
-- Same task framing: shared trunk -> (classification head, score head),
-  same loss (CrossEntropy + SCORE_LOSS_WEIGHT * MSE), same class weights,
-  same train/val split (by subject, already baked into the .npz).
-- Same training loop / metrics (accuracy, score MAE) as
-  train_action_quality_net.py, so numbers printed by both scripts can be
-  compared directly, epoch by epoch.
-- Only difference: the encoder. GRU = recurrent, processes the window
-  step-by-step and keeps a hidden state. TCN = convolutional, processes
-  the whole window with stacked dilated 1D convolutions and a residual
-  connection per block, then a global average pool over time. This is the
-  standard "recurrent vs convolutional" comparison in sequence modeling
-  literature.
-
-Checkpoint stores an 'arch': 'tcn' field (and the channel/kernel config)
-so a shared loader (see realtime_inference_action_quality.py) can
-reconstruct either model from its checkpoint without hardcoding which
-architecture was used.
-
-Prerequisites (same as train_action_quality_net.py):
-  1. generate_quality_labels.py   -> quality_labels.csv
-  2. build_windowed_dataset.py    -> action_quality_dataset.npz
-  3. this script                  -> action_quality_tcn.pt
-
-This file lives in <PROJECT_ROOT>/src/train_action_quality_tcn.py,
-alongside train_action_quality_net.py.
+It uses the same dataset, targets, loss, and metrics as the GRU script so that
+the two encoders can be compared fairly.
 """
 import os
 import sys
@@ -66,8 +38,9 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 class WindowDataset(Dataset):
-    """Identical to the one in train_action_quality_net.py."""
+    """Store input windows and their class and quality targets."""
     def __init__(self, X, y_class, y_score):
+        # Scale quality targets to [0, 1], matching the model output range.
         self.X = torch.from_numpy(X).float()
         self.y_class = torch.from_numpy(y_class).long()
         self.y_score = torch.from_numpy(y_score).float() / 100.0
@@ -80,10 +53,7 @@ class WindowDataset(Dataset):
 
 
 class TemporalBlock(nn.Module):
-    """One residual TCN block: two dilated 1D convolutions (same padding,
-    so the sequence length is preserved) + BatchNorm + ReLU + Dropout,
-    with a residual (skip) connection. A 1x1 conv on the skip path handles
-    the case where the channel count changes between blocks."""
+    """Residual TCN block with dilated convolutions and skip connection."""
 
     def __init__(self, in_channels, out_channels, kernel_size, dilation, dropout):
         super().__init__()
@@ -129,6 +99,7 @@ class ActionQualityTCN(nn.Module):
         # x: (batch, time, input_size) -> Conv1d wants (batch, channels, time)
         x = x.transpose(1, 2)
         features = self.network(x)          # (batch, channels, time)
+        # Average the learned features over time before applying both heads.
         pooled = features.mean(dim=2)       # global average pool over time
         class_logits = self.classifier(pooled)
         score = torch.sigmoid(self.scorer(pooled)).squeeze(-1)
@@ -136,8 +107,7 @@ class ActionQualityTCN(nn.Module):
 
 
 def run_epoch(model, loader, optimizer=None, class_weights=None):
-    """Identical logic to train_action_quality_net.py's run_epoch, so the
-    printed metrics are computed exactly the same way for both models."""
+    """Train or evaluate the model for one pass over the data."""
     is_training = optimizer is not None
     model.train(is_training)
 
@@ -154,6 +124,7 @@ def run_epoch(model, loader, optimizer=None, class_weights=None):
 
         with torch.set_grad_enabled(is_training):
             class_logits, score_pred = model(X)
+            # Use the same combined objective as the GRU model.
             class_loss = classification_loss_fn(class_logits, y_class)
             score_loss = regression_loss_fn(score_pred, y_score)
             loss = class_loss + SCORE_LOSS_WEIGHT * score_loss
@@ -181,6 +152,7 @@ def main():
         print(f"ERROR: {DATASET_NPZ} not found. Run build_windowed_dataset.py first.")
         return
 
+    # Load the same pre-built windows used by the GRU training script.
     data = np.load(DATASET_NPZ, allow_pickle=True)
     class_names = list(data['class_names'])
     window_length = int(data['window_length'])
@@ -216,6 +188,7 @@ def main():
 
     best_val_loss = float('inf')
 
+    # Train while tracking validation loss for checkpoint selection.
     for epoch in range(1, NUM_EPOCHS + 1):
         train_metrics = run_epoch(model, train_loader, optimizer, class_weights=class_weights)
         val_metrics = run_epoch(model, val_loader, optimizer=None, class_weights=class_weights)
@@ -226,6 +199,7 @@ def main():
               f"val: loss={val_metrics['loss']:.4f} acc={val_metrics['accuracy']*100:5.1f}% "
               f"score_mae={val_metrics['score_mae']:4.1f}")
 
+        # Save only the best-performing model on the validation set.
         if val_metrics['loss'] < best_val_loss:
             best_val_loss = val_metrics['loss']
             torch.save({
@@ -241,8 +215,6 @@ def main():
             print(f"           -> new best val_loss ({best_val_loss:.4f}), saved checkpoint")
 
     print(f"\nTraining complete. Best model saved to: {MODEL_PATH}")
-    print("Run compare_models.py to benchmark this checkpoint against "
-          "action_quality_net.pt (the GRU) on the same validation split.")
 
 
 if __name__ == '__main__':

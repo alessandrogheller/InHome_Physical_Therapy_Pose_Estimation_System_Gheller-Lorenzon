@@ -1,29 +1,8 @@
 """
-Live inference: loads a trained action-quality checkpoint (either the GRU
-from train_action_quality_net.py or the TCN from train_action_quality_tcn.py)
-and runs it on a sliding window of NORMALIZED webcam keypoints, showing
-(predicted exercise, quality score) as an overlay on the video feed.
+Run live action recognition and quality estimation from normalized keypoints.
 
-CHANGE VS THE ORIGINAL VERSION: this script now picks its architecture
-automatically from the checkpoint's 'arch' field (set by both training
-scripts), instead of hardcoding ActionQualityNet. This lets you point
-CHECKPOINT_PATH at either action_quality_net.pt (GRU) or
-action_quality_tcn.pt (TCN) and compare them live without touching any
-other code. Checkpoints saved before this change (no 'arch' key) are
-assumed to be GRU, for backward compatibility.
-
-CRITICAL: this script re-uses keypoint_normalize.py's frame_is_usable() /
-normalize_frame() -- the EXACT same normalization used to build the
-training data in build_windowed_dataset.py. If you ever change the
-normalization logic, change it only in keypoint_normalize.py so both the
-offline training pipeline and this live script stay in sync.
-
-IMPORTANT CAVEAT -- frame rate mismatch:
-MMFi's keypoint sequences are NOT necessarily sampled at the same rate
-your webcam captures at. See FRAME_SKIP below.
-
-This file lives in <PROJECT_ROOT>/src/realtime_inference_action_quality.py,
-alongside utils.py and keypoint_normalize.py.
+The checkpoint determines whether the GRU or TCN architecture is loaded, and
+predictions are produced from a sliding window of webcam frames.
 """
 import os
 import sys
@@ -67,9 +46,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def load_model(checkpoint_path):
-    """Reconstruct whichever architecture the checkpoint was trained with.
-    Checkpoints without an 'arch' key predate this change and are assumed
-    to be the GRU (the only architecture that existed at the time)."""
+    """Load the architecture and metadata stored in a checkpoint."""
     if not os.path.exists(checkpoint_path):
         print(f"Error: checkpoint not found at {checkpoint_path}. "
               "Run train_action_quality_net.py or train_action_quality_tcn.py first.")
@@ -112,11 +89,7 @@ def load_model(checkpoint_path):
 
 @torch.no_grad()
 def run_inference(model, window_buffer):
-    """window_buffer: list/deque of WINDOW_LENGTH (34,) float arrays.
-    Returns (probs: (num_classes,) numpy, score_0_100: float). Works
-    identically regardless of which architecture `model` actually is,
-    since both expose the same forward(x) -> (class_logits, score)
-    interface."""
+    """Run one prediction on a full normalized keypoint window."""
     X = np.stack(list(window_buffer), axis=0).astype(np.float32)  # (window_length, 34)
     X = torch.from_numpy(X).unsqueeze(0).to(DEVICE)                # (1, window_length, 34)
 
@@ -132,6 +105,7 @@ def main():
     model, class_names, window_length = load_model(CHECKPOINT_PATH)
     yolo_model = YOLO(MODEL_PATH)
 
+    # Keep only the most recent frames required by the model.
     window_buffer = deque(maxlen=window_length)
     patient_center = None
 
@@ -153,6 +127,7 @@ def main():
 
         _frame_counter += 1
 
+        # Detect the patient and extract normalized keypoints from the frame.
         results = yolo_model(frame, verbose=False)
         annotated_frame = results[0].plot()
 
@@ -169,9 +144,11 @@ def main():
                     flat = normalized_frame.reshape(FLAT_SIZE)  # (34,)
                     window_buffer.append(flat)
 
+            # Run inference only after the sliding window is full.
             if len(window_buffer) == window_length:
                 probs, score_0_100 = run_inference(model, window_buffer)
 
+                # Smooth predictions to reduce frame-to-frame fluctuations.
                 smoothed_probs = probs if smoothed_probs is None else (
                     PROB_SMOOTHING * probs + (1 - PROB_SMOOTHING) * smoothed_probs)
                 smoothed_score = score_0_100 if smoothed_score is None else (
@@ -180,6 +157,8 @@ def main():
                 top_idx = int(np.argmax(smoothed_probs))
                 top_conf = float(smoothed_probs[top_idx])
 
+                # Avoid displaying a definitive exercise label when confidence
+                # is too low.
                 if top_conf < CONFIDENCE_THRESHOLD:
                     last_result_text = f"Uncertain (top guess: {class_names[top_idx]}, {top_conf*100:.0f}%)"
                     last_color = (150, 150, 150)

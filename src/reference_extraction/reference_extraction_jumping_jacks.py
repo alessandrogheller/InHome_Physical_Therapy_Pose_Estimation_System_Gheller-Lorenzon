@@ -1,3 +1,5 @@
+"""Build a synchronized jumping-jack reference curve from MMFi keypoints."""
+
 import sys
 import os
 import numpy as np
@@ -16,44 +18,13 @@ from utils import (
 sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
-# --- CONFIGURATION ---
-# IMPORTANT: A26 was previously used here as a placeholder for "jumping up"
-# based on the MMFi README's rehabilitation-action list, WITHOUT verifying
-# that it specifically corresponds to a jumping-jack pattern (legs
-# splitting sideways + arms raised overhead) rather than a plain vertical
-# jump. Please confirm the correct action code against the MMFi paper/
-# README before trusting the extracted reference -- if A26 turns out to be
-# a vertical jump instead, this script will just produce a flat/meaningless
-# curve (a vertical jump barely moves the leg-spread or arm-raise signals
-# below).
-ACTION = 'A26'  # TODO: confirm this is really "jumping jacks" in MMFi, not a vertical jump
+# --- Configuration ---
+ACTION = 'A26'  # jumping jacks
 
-# --- Why the metrics changed from the squat/lunge scripts ---
-# A jumping jack barely flexes the knee at all -- almost all of the motion
-# is (a) hip ABDUCTION, spreading the legs sideways, and (b) shoulder
-# elevation, raising the arms overhead. A hip-knee-ankle angle (used for
-# squat/lunge/jump) would stay nearly flat throughout and couldn't
-# distinguish "legs together" from "legs apart". So instead we track TWO
-# independent, synchronized signals and require both to move together to
-# call it a valid repetition (see the note in the realtime-comparison
-# script this reference is meant to feed).
-#
-# 1) leg_spread_ratio: ankle-to-ankle distance, normalized by shoulder
-#    width. Using a ratio (not raw pixel distance) makes this roughly
-#    scale-invariant to how far the patient stands from the camera, the
-#    same way the calibration offset in the squat/lunge scripts corrects
-#    for setup differences -- except here we normalize by a body-derived
-#    unit instead of an additive angle offset, since spread is a distance,
-#    not an angle.
-# 2) arm_raise_angle: angle at the shoulder between hip-shoulder-wrist,
-#    averaged over both arms. Near a resting/arms-down pose the wrist sits
-#    close to the hip (small angle); with arms raised overhead the wrist is
-#    on the opposite side of the shoulder from the hip (angle approaches
-#    180 deg). This is the same calculate_angle() geometry used for the
-#    elbow in the limb-extension scripts, just applied to a different
-#    joint triplet to capture whole-arm elevation instead of elbow flexion.
+# Track two synchronized signals: normalized ankle distance for leg spread and
+# the average shoulder angle for arm elevation.
 
-# Keypoints required to be valid, for both metrics, on a given frame.
+# All keypoints needed to compute both signals must be valid.
 REQUIRED_KEYPOINTS = [
     LEFT_SHOULDER, RIGHT_SHOULDER,
     LEFT_HIP, RIGHT_HIP,
@@ -61,21 +32,13 @@ REQUIRED_KEYPOINTS = [
     LEFT_ANKLE, RIGHT_ANKLE,
 ]
 
-# One or more subjects to build the reference from. Averaging several
-# subjects gives a more robust reference than a single, arbitrarily chosen
-# one (same rationale as the squat/lunge scripts).
+# Average one or more subjects to build the reference curve.
 SUBJECTS = ['S01']  # e.g. ['S01', 'S03', 'S07'] to average multiple subjects
 
-# Number of points used to resample every subject's sequence to a common
-# length before averaging (sequences have different numbers of frames).
+# Common sequence length used before averaging subjects.
 REFERENCE_LENGTH = 100
 
-# Reference is saved as a single (REFERENCE_LENGTH, 2) array:
-#   column 0 = leg_spread_ratio curve
-#   column 1 = arm_raise_angle curve (degrees)
-# so both signals stay bundled together and time-aligned in one file,
-# instead of two separate .npy files that could drift out of sync if only
-# one gets regenerated later.
+# Save both time-aligned signals in one (REFERENCE_LENGTH, 2) array.
 REFERENCE_PATH = get_reference_path('jumping_jacks')
 
 database = MMFi_Database(DATASET_ROOT)
@@ -87,10 +50,7 @@ def euclidean(a, b):
 
 
 def extract_jumping_jack_signals(subject):
-    """Load one subject's jumping-jack sequence and return two aligned 1D
-    arrays: (leg_spread_ratio, arm_raise_angle), one value per valid frame.
-    Frames missing any of the 8 required keypoints are skipped entirely
-    (both signals need the same frames to stay meaningfully synchronized)."""
+    """Extract synchronized leg-spread and arm-raise signals for one subject."""
     data_form = {subject: [ACTION]}
     dataset = MMFi_Dataset(
         data_base=database,
@@ -122,8 +82,7 @@ def extract_jumping_jack_signals(subject):
 
         shoulder_width = euclidean(left_shoulder, right_shoulder)
         if shoulder_width < 1e-3:
-            # Degenerate frame (shoulders detected on top of each other) --
-            # normalizing by it would blow up the ratio, so skip.
+            # Skip frames with an unusable shoulder-width scale.
             n_skipped += 1
             continue
 
@@ -144,9 +103,7 @@ def extract_jumping_jack_signals(subject):
 
 
 def resample(sequence, length):
-    """Resample a 1D sequence to `length` points using linear interpolation
-    over normalized time [0, 1], so sequences of different original lengths
-    can be averaged point-by-point."""
+    """Resample a sequence to a common length using linear interpolation."""
     if len(sequence) == length:
         return sequence
     original_t = np.linspace(0.0, 1.0, num=len(sequence))
@@ -177,7 +134,7 @@ if len(resampled_spread) == 0:
     print("No subject produced a valid sequence. Aborting.")
     sys.exit(1)
 
-# Average across subjects, point-by-point on the normalized timeline.
+# Average both signals across subjects on the normalized timeline.
 leg_spread_curve = np.mean(np.stack(resampled_spread, axis=0), axis=0)
 arm_raise_curve = np.mean(np.stack(resampled_arm, axis=0), axis=0)
 

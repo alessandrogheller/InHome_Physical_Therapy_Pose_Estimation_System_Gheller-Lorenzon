@@ -1,3 +1,13 @@
+"""
+src/evaluate_dataset/evaluate_dataset_fixed_targets_lunge_right.py
+This script evaluates the right-sided lunge movement by extracting the knee-angle
+trajectory from MM-Fi reference sequences. For each subject, it computes the
+minimum knee flexion value (the lunge depth) and the maximum standing angle,
+then compares them against empirical dataset-level targets. The resulting score
+reflects how closely the movement matches a realistic lunge pattern and how
+consistently the subject reaches the expected depth while returning near a
+standing position.
+"""
 import sys
 import os
 import numpy as np
@@ -14,29 +24,24 @@ sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-ACTION = 'A16'  # A16 = Lunge (toward right side), rehabilitation activity (MMFi README)
+ACTION = 'A16'  # A16 = Lunge (toward right side)
 ENVIRONMENT = 'E01'
 
 # --- Target angles ---
-# STANDING_TARGET is reused from the squat/left-lunge pipelines: it just
-# represents the knee fully extended between repetitions, which is not
-# specific to any one exercise. It's a reasonable target for any bipedal
-# standing pose.
+# The standing target is the fully extended knee angle reused from the squat and
+# left-lunge pipelines. It represents the neutral upright pose between
+# repetitions and is not specific to a given exercise.
 STANDING_TARGET = 180.0
 STANDING_TOLERANCE = 1.0
 
-# IMPORTANT: same reasoning as in evaluate_dataset_fixed_targets_lunge.py
-# (the left-side script) applies here -- there is no published clinical
-# target angle for a lateral lunge's knee flexion. DEPTH_TARGET below is
-# estimated empirically as the mean minimum-knee-angle observed across all
-# MMFi subjects performing A16, i.e. "the average depth people in this
-# dataset reached" on the RIGHT side, not a validated clinical goal.
+# There is no published clinical target for the knee flexion depth of a lateral
+# lunge, so DEPTH_TARGET is estimated empirically from the dataset itself. It is
+# defined as the average of each subject's minimum knee angle, meaning the mean
+# depth reached by participants in this dataset, not a validated clinical value.
 #
-# Treat this as a data-driven placeholder. If you find (or your
-# supervisor/a physiotherapist provides) an actual clinical reference angle
-# for a lateral lunge, replace DEPTH_TARGET with that value instead.
-# DEPTH_TOLERANCE / falloff are still imported from utils.py so scoring stays
-# consistent with the rest of the pipeline.
+# If a clinician or supervisor provides an official reference angle, it should
+# replace this empirical target. DEPTH_TOLERANCE and the falloff curve remain
+# consistent with the rest of the project because they are imported from utils.py.
 
 # Auto-detect subject folders inside the environment
 environment_path = os.path.join(DATASET_ROOT, ENVIRONMENT)
@@ -50,8 +55,9 @@ database = MMFi_Database(DATASET_ROOT)
 
 
 def load_subject_angles(subject):
-    """Load one subject's A16 sequence and return the filtered right-knee
-    angle over time, or None if the subject/action could not be loaded."""
+    # Extract the right knee-angle trajectory from the reference motion sequence.
+    # Frames with missing or invalid keypoints are discarded so the signal reflects
+    # only valid pose estimates.
     try:
         data_form = {subject: [ACTION]}
         dataset = MMFi_Dataset(
@@ -87,7 +93,9 @@ def load_subject_angles(subject):
     return np.array(angles)
 
 
-# --- Pass 1: load all subjects, compute the empirical depth target ---
+# --- Pass 1: load all subjects and estimate the empirical depth target ---
+# We derive the target directly from the dataset by taking the mean of each
+# subject's minimum knee angle, which approximates the typical lunge depth.
 subject_angles = {}
 for subject in SUBJECTS:
     angles = load_subject_angles(subject)
@@ -105,6 +113,8 @@ print("NOTE: this is a data-driven placeholder, not a validated clinical target 
       "(unlike the squat's manually-set 95°). Replace it if you obtain a clinical reference.\n")
 
 # --- Pass 2: score each subject against the empirical target ---
+# The quality metric evaluates how close the subject gets to the expected lunge
+# depth while remaining close to a standing knee angle between repetitions.
 results = []
 for subject, angles in subject_angles.items():
     subject_standing = max(angles)

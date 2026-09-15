@@ -1,3 +1,5 @@
+"""Compare real-time arm-extension repetitions with reference movements."""
+
 import cv2
 import time
 import sys
@@ -15,23 +17,12 @@ from utils import (
     select_patient_keypoints, KP_CONF_THRESHOLD,
 )
 
-# A07 = "limb extension, left arm", A08 = "limb extension, right arm".
-# Angle measured at the elbow, between shoulder-elbow-wrist. Unlike the
-# single-sided realtime_comparison_limb_extension_left.py this replaces,
-# a real patient may naturally use either arm, so this script tracks both
-# during calibration and auto-selects the one that actually moved --
-# mirroring how realtime_comparison_lunge_movements.py auto-detects the
-# working leg for a lateral lunge.
-REFERENCE_PATH_LEFT = get_reference_path('limb_extension_left')    # A07 -- build with reference_extraction_limb_extension.py first
-REFERENCE_PATH_RIGHT = get_reference_path('limb_extension_right')  # A08 -- same script, right-side entry
+# Track the elbow angle and automatically select the arm that moves during
+# calibration, unless a specific side is configured.
+REFERENCE_PATH_LEFT = get_reference_path('limb_extension_left')    
+REFERENCE_PATH_RIGHT = get_reference_path('limb_extension_right')  
 
 # --- Debug logging ---
-# Set to True to print, every frame during "calibrating" and "resting"/
-# "extending", the raw/smoothed angle and whether keypoints were valid
-# (with their confidences). Noisy -- leave False for normal sessions. When
-# False, the only thing printed to the terminal is the one-line "Rep: ..."
-# result per repetition; everything else (calibration instructions, status,
-# warnings) is shown as an overlay on the video window instead.
 DEBUG = False
 
 # --- On-screen messaging ---
@@ -39,13 +30,7 @@ calibration_instruction = ""
 transient_message = None
 
 # --- Which arm to track ---
-# 'auto': track both arms during calibration and automatically pick
-#         whichever one shows the larger range of motion as the "working"
-#         arm for the rest of the session. This is the recommended default.
-#         The matching reference (left -> A07, right -> A08) is then used
-#         automatically for scoring.
-# 'left' / 'right': force a specific side (use if auto-detection misfires,
-#         or if you know in advance which arm the patient will use).
+# Use 'auto' to detect the moving arm or set 'left'/'right' manually.
 TRACKED_SIDE = 'auto'  # 'auto', 'left', or 'right'
 
 ARM_JOINTS = {
@@ -53,15 +38,7 @@ ARM_JOINTS = {
     'right': (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST),
 }
 
-# --- Asymmetric confidence threshold for the wrist ---
-# Same reasoning as in the single-sided script: shoulder/elbow tend to stay
-# well-tracked, but the wrist is a small, fast-moving extremity that
-# foreshortens/self-occludes at full extension (arm pointed toward or
-# across the camera) -- exactly when we most need a reading. Since the
-# wrist only defines the far end of the segment used for the angle (small
-# positional errors barely change the elbow angle itself), we accept a
-# lower confidence for it specifically instead of applying
-# KP_CONF_THRESHOLD to all three joints.
+# Use a lower confidence threshold for the fast-moving wrist.
 WRIST_CONF_THRESHOLD = 0.35
 
 
@@ -77,22 +54,10 @@ def arm_keypoints_valid(kp_xy, kp_conf, joints):
     return keypoints_are_valid(kp_xy, kp_conf, list(joints))
 
 
-# --- Fallback for missing/low-confidence keypoints ---
-# The wrist can drop below confidence threshold for several consecutive
-# frames right around full extension (self-occlusion / motion blur at the
-# fastest part of the movement). Rather than silently dropping those frames
-# (which could erase the true peak extension angle), we hold the last valid
-# raw angle for a limited number of frames. If keypoints stay invalid longer
-# than this, we stop updating -- better to lose a frame than fabricate data
-# from a stale pose.
+# Temporarily reuse the last valid angle when wrist confidence drops.
 MAX_HOLD_FRAMES = 20
 
-# --- Debounce before ending a repetition ---
-# A single noisy frame that dips back toward the resting angle right after
-# an occlusion gap (angle rebounding sharply) shouldn't be enough to close
-# out the repetition before the patient has actually returned to rest.
-# Requiring several consecutive confirming frames filters out that kind of
-# spike.
+# Require several frames below the resting threshold before ending a repetition.
 RESTING_CONFIRM_FRAMES = 3
 resting_confirm_count = 0
 
@@ -112,13 +77,7 @@ if references['left'] is None and references['right'] is None:
 
 
 def resolve_reference(side):
-    """Return (array, actual_side, note) for the requested side. If that
-    side's reference file is missing, fall back to the other side's
-    reference -- elbow flexion/extension angle at a given point in the
-    movement is ~symmetric left/right, so this is a reasonable
-    approximation -- and return a short note describing the fallback so it
-    can be shown on screen (never printed to the terminal, to keep stdout
-    limited to "Rep: ..." lines)."""
+    """Return the requested reference or a fallback from the other side."""
     other = 'right' if side == 'left' else 'left'
     if references.get(side) is not None:
         return references[side], side, None
@@ -133,44 +92,27 @@ for _side, _ref in references.items():
               f"extended(max)={_ref.max():.1f}°  "
               f"(target ROM: {_ref.max() - _ref.min():.1f}°)")
 
-# Reference used only to bootstrap the initial (pre-calibration) thresholds
-# below -- it doesn't matter much which side, since calibration overwrites
-# HIGH_THRESHOLD/LOW_THRESHOLD as soon as it completes.
+# Use a reference curve to initialize thresholds before calibration completes.
 active_reference = references['left'] if references['left'] is not None else references['right']
 
 # --- Thresholds for the repetition detector ---
-# IMPORTANT DIRECTION NOTE: this mirrors the squat/lunge state machine, but
-# flipped, exactly like the single-sided script. The baseline is the
-# FLEXED (LOW-angle) resting position, and a repetition is detected by the
-# angle RISING toward full extension and then coming back down. So
-# HIGH_THRESHOLD is the trigger to *enter* the movement (crossed while
-# resting) and LOW_THRESHOLD is the trigger to *confirm return to rest*
-# (crossed while extending).
+# A repetition starts when the angle rises above HIGH_THRESHOLD and ends
+# after it falls below LOW_THRESHOLD.
 _ref_range = active_reference.max() - active_reference.min()
 HIGH_THRESHOLD = active_reference.min() + 0.3 * _ref_range   # crossing above -> extension has started
 LOW_THRESHOLD = active_reference.min() + 0.1 * _ref_range    # crossing below (while extending) -> back to rest
 MIN_REP_FRAMES = 10  # discard repetitions that are too short (likely noise)
 
 # --- Adaptive threshold calibration ---
-# Always on here: since we don't know in advance which arm the patient
-# will use, or what their natural resting flexion looks like, thresholds
-# are always re-estimated from the patient's own observed range during the
-# calibration window rather than assumed from the reference curve.
-#
-# IMPORTANT: the patient must perform ONE FULL REPETITION during this
-# window (rest with the arm flexed -> extend the arm fully -> return to
-# rest), not just hold still -- holding still only shows the resting
-# extreme, never the extended extreme, and the two thresholds would end up
-# almost identical and useless for detecting repetitions.
+# Estimate thresholds from the patient's own range; perform one full extension
+# during calibration to capture both resting and extended positions.
 CALIBRATION_DURATION = 12.0  # seconds; long enough to rest briefly, then do one full rep
 
 # --- Timeout for an in-progress repetition ---
 MAX_MOVING_DURATION = 10.0  # seconds
 
 # --- Smoothing filter for the angle signal ---
-# Elbow extension can be a fast movement; if the smoothed signal looks too
-# laggy/compressed on your setup, lower this, but validate with DEBUG=True
-# that the smoothed signal still reaches the true peak extension angle.
+# Smooth the angle signal to reduce noise during fast movements.
 SMOOTHING_FACTOR = 0.5
 smoothed_angle = None
 last_valid_raw_angle = None
@@ -190,9 +132,8 @@ moving_start_time = None
 resting_angle_history = []
 MAX_RESTING_HISTORY = 10
 
-# During calibration we track BOTH arms (unless TRACKED_SIDE forces one),
-# so we can compare their observed range of motion at the end and pick the
-# one that actually moved -- that's the arm the patient used.
+# Track both arms during automatic calibration and select the one with the
+# largest observed range of motion.
 calibration_angles = {'left': [], 'right': []} if TRACKED_SIDE == 'auto' else {TRACKED_SIDE: []}
 working_side = None if TRACKED_SIDE == 'auto' else TRACKED_SIDE
 
@@ -215,10 +156,7 @@ if not cap.isOpened():
 
 cv2.namedWindow('Limb Extension Comparison - Press Q to quit', cv2.WINDOW_NORMAL)
 
-# The calibration timer starts here, right after the webcam is confirmed
-# open and the window exists, so webcam init delay (driver startup,
-# autofocus/autoexposure warm-up) doesn't silently eat into the
-# "get into position" time available to the patient.
+# Start calibration after the webcam and display are ready.
 calibration_start_time = time.time()
 
 while True:
@@ -244,10 +182,7 @@ while True:
             else:
                 calibration_instruction = "Perform ONE full arm extension to calibrate the system"
 
-            # Track every candidate arm so we can pick the one that
-            # actually moves. arm_keypoints_valid / calculate_angle are
-            # evaluated per-arm since one arm may be valid while the other
-            # is occluded.
+            # Collect valid angles for each candidate arm.
             for side, joints in ARM_JOINTS.items():
                 if side not in calibration_angles:
                     continue
@@ -262,9 +197,7 @@ while True:
                     print(f"[calib][{side}] INVALID keypoints, skipped")
 
             if elapsed > CALIBRATION_DURATION:
-                # Pick the working arm: whichever has the larger observed
-                # range of motion. If TRACKED_SIDE forced a side, that's the
-                # only key present and this just uses it directly.
+                # Select the arm with the largest observed range of motion.
                 best_side, best_range, best_angles = None, -1.0, None
                 for side, angles in calibration_angles.items():
                     if len(angles) < 2:
@@ -317,10 +250,7 @@ while True:
                 last_valid_raw_angle = raw_angle
                 hold_frames_left = MAX_HOLD_FRAMES
             elif last_valid_raw_angle is not None and hold_frames_left > 0:
-                # Brief confidence dip (common right at full extension, due
-                # to wrist foreshortening/self-occlusion): reuse the last
-                # valid angle instead of dropping the frame entirely, so a
-                # momentary dip doesn't erase the true peak.
+                # Reuse the last valid angle during a brief confidence dip.
                 raw_angle = last_valid_raw_angle
                 hold_frames_left -= 1
                 if DEBUG:
@@ -376,45 +306,20 @@ while True:
                               f"({resting_confirm_count}/{RESTING_CONFIRM_FRAMES} to confirm rest)")
 
                     if resting_confirm_count < RESTING_CONFIRM_FRAMES:
-                        # Not confirmed yet -- could be a noise dip right
-                        # after an occlusion gap. Stay in "extending" and
-                        # keep appending to rep_buffer so we don't lose real
-                        # data if the patient really is still extending.
+                        # Wait for consecutive confirmations before ending the rep.
                         pass
                     else:
                         state = "resting"
                         resting_confirm_count = 0
 
                         if len(rep_buffer) >= MIN_REP_FRAMES:
-                            # NOTE: unlike the squat/lunge (where "standing
-                            # with a straight leg" is a near-universal ~180
-                            # deg pose, so it's a safe anchor for an
-                            # additive camera/body-bias correction), the
-                            # "resting" flexed elbow position has no such
-                            # universal value -- how tightly someone
-                            # naturally rests their elbow varies a lot from
-                            # person to person and isn't the same thing as
-                            # their maximum flexion. Calibrating an offset
-                            # from it doesn't correct a genuine measurement
-                            # bias; it just encodes however flexed (or not)
-                            # this particular person's resting posture
-                            # happened to be, and wrongly shifts the
-                            # extension reading by that same amount.
-                            #
-                            # A full extension (straight arm, ~180 deg) is,
-                            # by contrast, an anatomically fixed pose that
-                            # doesn't need this kind of per-patient
-                            # recalibration -- much like "standing straight"
-                            # in the squat script. So we score the raw
-                            # achieved peak directly against the reference's
-                            # extension target, with no offset applied.
+                            # Compare the achieved extension directly with the
+                            # reference target without applying an angle offset.
                             extension_achieved = max(rep_buffer)
                             extension_target = active_reference.max()
                             extension_diff = abs(extension_achieved - extension_target)
 
-                            # Same two-zone scoring function used for the
-                            # squat/lunge, so results stay comparable in
-                            # structure (score is still 0-100%).
+                            # Use the shared two-zone scoring function.
                             accuracy_pct = calculate_depth_score(extension_diff)
 
                             arm_label = "left" if working_side == "left" else "right"

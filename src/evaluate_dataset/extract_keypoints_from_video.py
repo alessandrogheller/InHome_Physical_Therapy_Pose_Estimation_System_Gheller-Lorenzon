@@ -1,21 +1,9 @@
 """
 src/evaluate_dataset/extract_keypoints_from_video.py
-
-Extracts a raw (T, 17, 2) keypoint sequence + (T, 17) confidence sequence
-from a single video file, using the SAME YOLO model and patient-selection
-logic as the live webcam scripts (utils.select_patient_keypoints), so the
-extracted data has the same statistical "flavor" as what the network sees
-live -- not MMFi's ResNet-48-based keypoints.
-
-Usage:
-    python extract_keypoints_from_video.py <video_path> <subject_id> <exercise_name>
-
-exercise_name must be one of the 6 classes used in build_windowed_dataset.py:
-    squat, lunge_left, lunge_right, limb_extension_left,
-    limb_extension_right, jumping_jacks
-
-Output is written to <PROJECT_ROOT>/eval_dataset/<subject_id>/<exercise_name>/,
-regardless of where the source video lives on disk.
+Extract the 2D pose sequence and confidence scores from a single video using the
+same YOLO-based patient selection logic as the live webcam pipeline. The output
+is stored under the evaluation dataset folder and can be used by the trainer or
+by the evaluation scripts that expect a consistent per-frame keypoint format.
 """
 import sys
 import os
@@ -24,8 +12,7 @@ import os
 # This script lives in src/evaluate_dataset/, two levels below the project
 # root, but needs to import utils.py from src/. Adding src/ to sys.path
 # explicitly (instead of relying on the current working directory) means
-# this script works no matter where it's launched from -- same fix already
-# applied to the other cross-folder scripts (see reference_extraction_*.py).
+# this script works no matter where it's launched from -- 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 if _SRC_DIR not in sys.path:
@@ -41,11 +28,9 @@ from utils import MODEL_PATH, PROJECT_ROOT, select_patient_keypoints
 
 EVAL_DATASET_ROOT = os.path.join(PROJECT_ROOT, 'eval_dataset')
 
-# MMFi's rgb sequences are ~297 frames over ~30s -> ~10fps. Videos recorded
-# with a phone/webcam are almost always higher fps, so we downsample by
-# frame-skipping to roughly match the temporal density the network (and its
-# WINDOW_LENGTH/WINDOW_STRIDE, defined in frames not seconds) was trained
-# on -- same rationale as FRAME_SKIP in realtime_inference_action_quality.py.
+# MMFi sequences are captured at roughly 10 fps, while webcam or phone videos are
+# typically much faster. We skip frames to approximate the temporal sampling used
+# during model training, so the extracted sequence has a similar motion density.
 MMFI_APPROX_FPS = 10.0
 
 VALID_EXERCISES = {
@@ -61,6 +46,8 @@ def extract(video_path, subject_id, exercise_name):
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
 
+    # Load the detection model once and open the source video for frame-by-frame
+    # processing.
     model = YOLO(MODEL_PATH)
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -71,6 +58,8 @@ def extract(video_path, subject_id, exercise_name):
     print(f"Video fps={video_fps:.1f} -> frame_skip={frame_skip} "
           f"(effective extraction rate ~{video_fps / frame_skip:.1f}fps)")
 
+    # Store the valid pose detections over time; these will later be saved as the
+    # evaluation sequence for this subject and exercise.
     keypoints_seq = []
     conf_seq = []
     patient_center = None
@@ -104,6 +93,8 @@ def extract(video_path, subject_id, exercise_name):
     keypoints_seq = np.stack(keypoints_seq, axis=0)  # (T, 17, 2)
     conf_seq = np.stack(conf_seq, axis=0)            # (T, 17)
 
+    # Save the extracted sequence in the same structure expected by the evaluation
+    # and training pipelines.
     out_dir = os.path.join(EVAL_DATASET_ROOT, subject_id, exercise_name)
     os.makedirs(out_dir, exist_ok=True)
     np.save(os.path.join(out_dir, 'keypoints.npy'), keypoints_seq)

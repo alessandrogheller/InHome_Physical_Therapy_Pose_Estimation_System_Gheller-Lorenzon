@@ -1,3 +1,5 @@
+"""Build left- and right-side lunge reference curves from MMFi data."""
+
 import sys
 import os
 import numpy as np
@@ -14,19 +16,8 @@ from utils import (
 sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
-# --- CONFIGURATION ---
-# One entry per side. Each lunge direction is its own MMFi action and uses
-# the leg that actually loads/bends on that side (mirrors the two separate
-# scripts this replaces: reference_extraction_lunge.py for A15/left and
-# reference_extraction_lunge_right.py for A16/right), but both are now built
-# in a single run so you don't have to remember to run two scripts and keep
-# them in sync.
-#
-# SUBJECTS is per-side on purpose: the two actions are scored separately
-# (see evaluate_dataset_fixed_targets_lunge.py / _right.py), so the subjects
-# that performed well on A15 aren't necessarily the same ones that performed
-# well on A16. Edit each list independently once you have your
-# "good_subjects" results for that side.
+# --- Configuration ---
+# Each side uses its own action code, leg joints, subjects, and output path.
 SIDES = {
     'left': {
         'action': 'A15',                                   # Lunge (toward left side)
@@ -42,18 +33,14 @@ SIDES = {
     },
 }
 
-# Number of points used to resample every subject's sequence to a common
-# length before averaging (sequences have different numbers of frames).
+# Common length used before averaging sequences with different frame counts.
 REFERENCE_LENGTH = 100
 
 database = MMFi_Database(DATASET_ROOT)
 
 
 def extract_knee_angle_sequence(subject, action, joints):
-    """Load one subject's sequence for `action` and return the (filtered)
-    knee angle over time as a 1D numpy array, using whichever hip/knee/ankle
-    triplet is passed in `joints` (left or right leg -- whichever one loads
-    and bends for that lunge direction)."""
+    """Extract the valid knee-angle sequence for one subject and action."""
     data_form = {subject: [action]}
     dataset = MMFi_Dataset(
         data_base=database,
@@ -84,9 +71,7 @@ def extract_knee_angle_sequence(subject, action, joints):
 
 
 def resample(sequence, length):
-    """Resample a 1D sequence to `length` points using linear interpolation
-    over normalized time [0, 1], so sequences of different original lengths
-    can be averaged point-by-point."""
+    """Resample a sequence to a common length using linear interpolation."""
     if len(sequence) == length:
         return sequence
     original_t = np.linspace(0.0, 1.0, num=len(sequence))
@@ -95,8 +80,7 @@ def resample(sequence, length):
 
 
 def build_reference(side_name, config):
-    """Build and save the reference curve for one side ('left' or 'right'),
-    exactly like the standalone scripts did, just parameterized."""
+    """Build and save one side's average knee-angle reference curve."""
     action = config['action']
     joints = config['joints']
     subjects = config['subjects']
@@ -129,6 +113,7 @@ def build_reference(side_name, config):
 
 
 # --- Build both reference curves ---
+# Process each side independently so one missing action does not block the other.
 results = {side: build_reference(side, config) for side, config in SIDES.items()}
 
 if not any(results.values()):

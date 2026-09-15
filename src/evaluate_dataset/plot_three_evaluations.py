@@ -1,24 +1,10 @@
 """
-src/evaluate_dataset/plot_three_methods_comparison.py
+src/evaluate_dataset/plot_three_evaluations.py
 
-Reads the CSV produced by evaluate_on_new_subjects_with_3_methods.py
-(three_methods_comparison.csv) and produces report-ready figures comparing
-the rule-based, GRU, and TCN quality scores across subjects/exercises.
-
-Matches the CSV produced by evaluate_three_methods.py:
-    subject, exercise, n_frames,
-    rule_based_score,
-    gru_score, gru_pred_class, gru_pred_conf, gru_class_correct,
-    tcn_score, tcn_pred_class, tcn_pred_conf, tcn_class_correct
-
-If you rename columns in evaluate_three_methods.py, just edit the COLUMN
-MAPPING section right below the imports -- everything else works off
-those names, nothing is hardcoded elsewhere.
-
-Usage:
-    python plot_three_methods_comparison.py path/to/three_methods_comparison.csv
-
-Output: a set of .png files saved next to the input CSV (or in --outdir).
+Visualize the CSV produced by evaluate_on_new_subjects_with_3_methods.py and
+compare the rule-based, GRU, and TCN scores across subjects and exercises.
+The plotting functions are designed to match the output format written by the
+evaluation script, so the column mapping stays centralized in one place.
 """
 import os
 import sys
@@ -28,7 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# --- COLUMN MAPPING: matches evaluate_three_methods.py's CSV output --------
+# --- COLUMN MAPPING: matches the CSV written by evaluate_on_new_subjects_with_3_methods.py ---
 COL_SUBJECT = 'subject'
 COL_EXERCISE = 'exercise'
 COL_RULE_SCORE = 'rule_based_score'
@@ -43,6 +29,9 @@ METHOD_COLORS = {'Rule-based': '#4C72B0', 'GRU': '#DD8452', 'TCN': '#55A868'}
 
 
 def load_data(csv_path):
+    # Read the comparison table and validate that all fields needed for the plots
+    # are present. Missing values are allowed for method scores when a model fails
+    # on a specific video, but the required metadata columns must still exist.
     df = pd.read_csv(csv_path)
     required = [COL_SUBJECT, COL_EXERCISE, COL_RULE_SCORE, COL_GRU_SCORE, COL_TCN_SCORE]
     missing = [c for c in required if c not in df.columns]
@@ -52,12 +41,12 @@ def load_data(csv_path):
             f"Found columns: {list(df.columns)}. "
             "Edit the COLUMN MAPPING section at the top of this script to match your CSV."
         )
+    # Build a compact label for reporting and debugging, such as "S01/jumping_jacks".
     df['label'] = df[COL_SUBJECT].astype(str) + '/' + df[COL_EXERCISE].astype(str)
 
-    # A method can legitimately fail on a given video (e.g. sequence too
-    # short to form one window) -- evaluate_three_methods.py leaves that
-    # cell empty, which pandas reads as NaN. Report it instead of silently
-    # letting it break a plot.
+    # A method can legitimately fail on a given video (for example when a sequence
+    # is too short to form a valid window). Pandas reads missing values as NaN,
+    # so we warn explicitly and skip those rows in plots that require a score.
     for col, name in [(COL_RULE_SCORE, 'rule-based'), (COL_GRU_SCORE, 'GRU'), (COL_TCN_SCORE, 'TCN')]:
         n_missing = df[col].isna().sum()
         if n_missing > 0:
@@ -66,7 +55,7 @@ def load_data(csv_path):
     return df
 
 
-# --- 1. Grouped bar chart: mean score per exercise, averaged across subjects
+# --- 1. Grouped bar chart: mean score per exercise, averaged across subjects ---
 def plot_grouped_bars(df, outdir):
     exercises = sorted(df[COL_EXERCISE].unique())
 
@@ -74,6 +63,7 @@ def plot_grouped_bars(df, outdir):
     stds = {m: [] for m in ('rule', 'gru', 'tcn')}
     counts = []
 
+    # Compute the average score for each method within every exercise class.
     for ex in exercises:
         sub = df[df[COL_EXERCISE] == ex]
         for key, col in (('rule', COL_RULE_SCORE), ('gru', COL_GRU_SCORE), ('tcn', COL_TCN_SCORE)):
@@ -85,6 +75,7 @@ def plot_grouped_bars(df, outdir):
     x = np.arange(len(exercises))
     width = 0.25
 
+    # Plot a grouped bar chart to compare the mean performance across methods.
     fig, ax = plt.subplots(figsize=(max(9, len(exercises) * 1.6), 6))
     ax.bar(x - width, means['rule'], width, yerr=stds['rule'], capsize=4,
            label='Rule-based', color=METHOD_COLORS['Rule-based'])
@@ -108,7 +99,7 @@ def plot_grouped_bars(df, outdir):
     print(f"Saved: {path}")
 
 
-# --- 2. Heatmaps: subject x exercise, one panel per method -----------------
+# --- 2. Heatmaps: subject x exercise, one panel per method --------------------
 def plot_heatmaps(df, outdir):
     subjects = sorted(df[COL_SUBJECT].unique())
     exercises = sorted(df[COL_EXERCISE].unique())
@@ -117,6 +108,7 @@ def plot_heatmaps(df, outdir):
     fig, axes = plt.subplots(1, 3, figsize=(16, 4 + 0.3 * len(subjects)))
 
     for ax, (name, col) in zip(axes, methods):
+        # Build a matrix where rows are subjects and columns are exercises.
         matrix = np.full((len(subjects), len(exercises)), np.nan)
         for _, row in df.iterrows():
             i = subjects.index(row[COL_SUBJECT])
@@ -142,7 +134,7 @@ def plot_heatmaps(df, outdir):
     print(f"Saved: {path}")
 
 
-# --- 3. Pairwise agreement scatter plots -----------------------------------
+# --- 3. Pairwise agreement scatter plots -------------------------------------
 def plot_agreement(df, outdir):
     pairs = [
         ('Rule-based', COL_RULE_SCORE, 'GRU', COL_GRU_SCORE),
@@ -152,6 +144,7 @@ def plot_agreement(df, outdir):
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     for ax, (name_a, col_a, name_b, col_b) in zip(axes, pairs):
+        # Keep only paired rows where both methods produced a valid score.
         paired = df.dropna(subset=[col_a, col_b])
         a, b = paired[col_a].values, paired[col_b].values
         r = np.corrcoef(a, b)[0, 1] if len(a) > 1 else float('nan')
@@ -176,7 +169,7 @@ def plot_agreement(df, outdir):
     print(f"Saved: {path}")
 
 
-# --- 4. Confusion matrices for GRU / TCN exercise classification -----------
+# --- 4. Confusion matrices for GRU / TCN exercise classification ---------------
 def plot_confusion_matrices(df, outdir):
     if COL_GRU_PRED not in df.columns and COL_TCN_PRED not in df.columns:
         print("No prediction columns found, skipping confusion matrices.")
@@ -193,6 +186,7 @@ def plot_confusion_matrices(df, outdir):
         axes = [axes]
 
     for ax, (name, col, correct_col) in zip(axes, preds_available):
+        # Count true-vs-predicted exercise labels for each model.
         cm = np.zeros((len(exercises), len(exercises)), dtype=int)
         valid_rows = df.dropna(subset=[col])
         for _, row in valid_rows.iterrows():
@@ -208,9 +202,8 @@ def plot_confusion_matrices(df, outdir):
         ax.set_yticklabels(exercises, fontsize=8)
         ax.set_xlabel('Predicted')
         ax.set_ylabel('True (folder name)')
-        # Prefer the pre-computed *_class_correct flags (written by
-        # evaluate_three_methods.py) over re-deriving accuracy from the
-        # matrix, so this number always matches what the main script printed.
+        # Prefer the precomputed *_class_correct flags written by the evaluation
+        # script so the displayed accuracy matches the main report exactly.
         if correct_col in df.columns and df[correct_col].notna().any():
             acc = df[correct_col].dropna().astype(bool).mean()
         else:
@@ -229,7 +222,7 @@ def plot_confusion_matrices(df, outdir):
     print(f"Saved: {path}")
 
 
-# --- 5. Boxplot of score distributions per method ---------------------------
+# --- 5. Boxplot of score distributions per method -----------------------------
 def plot_boxplot(df, outdir):
     fig, ax = plt.subplots(figsize=(6, 5))
     data = [df[COL_RULE_SCORE].dropna(), df[COL_GRU_SCORE].dropna(), df[COL_TCN_SCORE].dropna()]
@@ -261,6 +254,8 @@ def main():
                               "next to the CSV)")
     args = parser.parse_args()
 
+    # Save all figures in a dedicated folder next to the source CSV unless the user
+    # explicitly provides a different output directory.
     csv_dir = os.path.dirname(os.path.abspath(args.csv_path)) or '.'
     outdir = args.outdir or os.path.join(csv_dir, 'comparison_plots')
     os.makedirs(outdir, exist_ok=True)

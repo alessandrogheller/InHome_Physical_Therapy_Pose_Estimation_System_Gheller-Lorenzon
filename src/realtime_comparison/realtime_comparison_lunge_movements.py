@@ -1,3 +1,5 @@
+"""Compare real-time lunge repetitions with reference movements."""
+
 import cv2
 import time
 import sys
@@ -15,45 +17,19 @@ from utils import (
     select_patient_keypoints, KP_CONF_THRESHOLD,
 )
 
-REFERENCE_PATH_LEFT = get_reference_path('lunge_left')        # A15 (left side) -- built by reference_extraction_lunge.py
-REFERENCE_PATH_RIGHT = get_reference_path('lunge_right')  # A16 (right side) -- built by reference_extraction_lunge_right.py
-# Run whichever of the two extraction scripts you need before using this
-# script. If only one of the two reference files exists, the other side
-# falls back to it automatically (see resolve_reference() below).
+REFERENCE_PATH_LEFT = get_reference_path('lunge_left')       
+REFERENCE_PATH_RIGHT = get_reference_path('lunge_right')  
+# If one reference is missing, the other side is used as a fallback.
 
 # --- Debug logging ---
-# Set to True to print, every frame during "calibrating" and "moving",
-# the raw/smoothed angle and whether keypoints were valid (with their
-# confidences). Useful for diagnosing detection problems, but noisy for
-# normal use -- leave False for day-to-day sessions. When False, the only
-# thing printed to the terminal is the one-line "Rep: ..." result per
-# repetition; everything else (calibration instructions, status, warnings)
-# is shown as an overlay on the video window instead.
 DEBUG = False
 
-# --- On-screen messaging (replaces the old terminal prints) ---
-# calibration_instruction: shown continuously while state == "calibrating".
-# transient_message: (text, expire_timestamp, bgr_color) shown for a few
-# seconds after calibration ends (success, failure, or a low-ROM warning),
-# then cleared automatically. Declared early because resolve_reference()
-# below can also populate it (e.g. when falling back from a missing
-# reference file), before the rest of the setup runs.
+# --- On-screen messaging ---
 calibration_instruction = ""
 transient_message = None
 
 # --- Which leg to track ---
-# A real patient may naturally lunge to either side. If you hardcoded
-# LEFT_KNEE while they load the RIGHT leg (or vice versa), the other knee
-# barely moves: calibration collapses to a tiny obs_range and HIGH/LOW
-# thresholds end up almost identical, so no repetition ever fires.
-#
-# 'auto': track both legs during calibration and automatically pick
-#         whichever one shows the larger range of motion as the "working"
-#         (loaded) leg for the rest of the session. This is the recommended
-#         default. The matching reference (left -> A15, right -> A16) is
-#         then used automatically for scoring.
-# 'left' / 'right': force a specific side (use if auto-detection misfires,
-#         or if you know in advance which side the patient will lunge to).
+# Use 'auto' to detect the loaded leg or set 'left'/'right' manually.
 TRACKED_SIDE = 'auto'  # 'auto', 'left', or 'right'
 
 LEG_JOINTS = {
@@ -61,18 +37,7 @@ LEG_JOINTS = {
     'right': (RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE),
 }
 
-# --- Asymmetric confidence threshold for the ankle ---
-# In the calibration logs, hip and knee confidence were almost always >0.9,
-# but ankle confidence hovered right around KP_CONF_THRESHOLD (0.5) --
-# sometimes 0.51, sometimes 0.49 -- and kept invalidating the whole
-# hip-knee-ankle triplet even though the knee itself (what we actually
-# measure) was tracked perfectly. This is expected for a lateral lunge: the
-# loaded ankle rotates/foreshortens relative to the camera as you go down,
-# which is exactly when the model is least confident about it. Since we
-# only need the ankle to define the lower segment of the angle (small
-# errors in its exact position barely change the knee angle), we accept a
-# lower confidence for it specifically instead of using KP_CONF_THRESHOLD
-# for all three joints.
+# Use a lower confidence threshold for the ankle during deep lunges.
 ANKLE_CONF_THRESHOLD = 0.35
 
 
@@ -88,27 +53,10 @@ def leg_keypoints_valid(kp_xy, kp_conf, joints):
     return keypoints_are_valid(kp_xy, kp_conf, list(joints))
 
 
-# --- Fallback for missing/low-confidence keypoints ---
-# Lateral lunges rotate/partially occlude the loaded leg right at the
-# deepest point of the movement -- exactly where the pose model is most
-# likely to drop below confidence threshold. Previously, an invalid frame
-# was silently skipped (no angle update at all), which meant the true
-# minimum angle could be missed entirely if it coincided with a
-# low-confidence frame. Instead, we hold the last valid raw angle for a
-# number of frames so a confidence dip doesn't erase the deepest part of
-# the rep. Raised from 5 to 20: the logs showed occlusion gaps of up to
-# ~15-20 consecutive invalid frames right at the bottom of the movement,
-# and 5 frames of hold was nowhere near enough to bridge that. If keypoints
-# stay invalid longer than this, we stop updating (better to lose a frame
-# than to fabricate data from a stale, no-longer-true pose).
+# Temporarily reuse the last valid angle when ankle confidence drops.
 MAX_HOLD_FRAMES = 20
 
-# --- Debounce before ending a repetition ---
-# Previously, a single noisy frame above HIGH_THRESHOLD (e.g. right after
-# recovering from an occlusion gap, with the angle rebounding sharply) was
-# enough to end the "moving" state and score the rep -- even though the
-# patient hadn't actually returned to standing yet. Requiring several
-# consecutive frames above threshold filters out that kind of spike.
+# Require several frames above the standing threshold before ending a repetition.
 STANDING_CONFIRM_FRAMES = 3
 standing_confirm_count = 0
 
@@ -128,12 +76,7 @@ if references['left'] is None and references['right'] is None:
 
 
 def resolve_reference(side):
-    """Return (array, actual_side, note) for the requested side. If that
-    side's reference file is missing, fall back to the other side's
-    reference -- knee flexion angle at a given depth is ~symmetric
-    left/right, so this is a reasonable approximation -- and return a short
-    note describing the fallback so it can be shown on screen (never
-    printed to the terminal, to keep stdout limited to "Rep: ..." lines)."""
+    """Return the requested reference or a fallback from the other side."""
     other = 'right' if side == 'left' else 'left'
     if references.get(side) is not None:
         return references[side], side, None
@@ -142,35 +85,18 @@ def resolve_reference(side):
     return references[other], other, note
 
 
-# Reference used only to bootstrap the initial (pre-calibration) thresholds
-# below -- it doesn't matter much which side, since USE_ADAPTIVE_THRESHOLDS
-# overwrites HIGH_THRESHOLD/LOW_THRESHOLD as soon as calibration completes.
+# Use a reference curve to initialize thresholds before calibration completes.
 active_reference = references['left'] if references['left'] is not None else references['right']
 
 # --- Thresholds for the repetition detector ---
-# IMPORTANT: the 165/145 values used in the squat pipeline were tuned for a
-# squat's range of motion and are NOT assumed valid here. Since we don't have
-# a validated range for a lateral lunge either, adaptive calibration is kept
-# ON by default (see USE_ADAPTIVE_THRESHOLDS below) so the thresholds are
-# estimated from the reference curve's own range instead of hardcoded.
+# Estimate thresholds from the reference range instead of using squat values.
 _ref_range = active_reference.max() - active_reference.min()
 HIGH_THRESHOLD = active_reference.max() - 0.1 * _ref_range   # "standing" / leg extended
 LOW_THRESHOLD = active_reference.max() - 0.3 * _ref_range    # "moving/down" into the lunge
 MIN_REP_FRAMES = 10  # discard repetitions that are too short (likely noise)
 
 # --- Adaptive threshold calibration ---
-# If True, the first CALIBRATION_DURATION seconds re-estimate HIGH/LOW
-# threshold from the patient's own observed range instead of the
-# reference-derived values above -- recommended here even more than for the
-# squat script, since we have less certainty about what a "normal" A15
-# range of motion looks like for an arbitrary patient/camera setup.
-#
-# IMPORTANT: unlike just "standing still", the patient must perform ONE
-# FULL REPETITION of the lunge during this window (stand -> step out to the
-# side and bend the left knee -> return to standing). Standing still alone
-# only shows the "standing" extreme, never the "depth" extreme, which would
-# make HIGH_THRESHOLD and LOW_THRESHOLD end up almost identical and useless
-# for detecting repetitions.
+# Re-estimate thresholds from the patient's range during one full lunge.
 USE_ADAPTIVE_THRESHOLDS = True
 CALIBRATION_DURATION = 12.0  # seconds; long enough to stand still briefly, then do one full rep
 
@@ -178,19 +104,14 @@ CALIBRATION_DURATION = 12.0  # seconds; long enough to stand still briefly, then
 MAX_MOVING_DURATION = 10.0  # seconds
 
 # --- Smoothing filter for the angle signal ---
-# Raised from 0.3 to 0.5: with a fast movement like a lateral lunge (the
-# low point of the rep can last under a second), a heavy filter (0.3)
-# significantly lags behind and compresses the true range of motion, which
-# was likely contributing to thresholds that were never actually reached.
-# If the signal now looks too jittery on your setup, lower it again, but
-# validate with DEBUG=True that the true minimum angle is still being
-# reached by the smoothed signal.
+# Smooth the angle signal to reduce noise during the fast movement.
 SMOOTHING_FACTOR = 0.5
 smoothed_angle = None
 last_valid_raw_angle = None
 hold_frames_left = 0  # counts down while reusing the last valid raw angle
 
 # --- Detector state ---
+# The detector calibrates, waits while standing, and tracks the lunge.
 state = "calibrating" if USE_ADAPTIVE_THRESHOLDS else "standing"
 rep_buffer = []
 last_result_text = "Waiting for movement..."
@@ -200,9 +121,8 @@ moving_start_time = None
 standing_angle_history = []
 MAX_STANDING_HISTORY = 10
 
-# During calibration we track BOTH legs (unless TRACKED_SIDE forces one),
-# so we can compare their observed range of motion at the end and pick the
-# one that actually moved -- that's the leg the patient loaded.
+# Track both legs during automatic calibration and select the one with the
+# largest observed range of motion.
 calibration_angles = {'left': [], 'right': []} if TRACKED_SIDE == 'auto' else {TRACKED_SIDE: []}
 calibration_start_time = time.time()
 working_side = None if TRACKED_SIDE == 'auto' else TRACKED_SIDE
@@ -253,9 +173,7 @@ while True:
             else:
                 calibration_instruction = "Perform ONE full lunge repetition to calibrate the system"
 
-            # Track every candidate leg so we can pick the one that actually
-            # moves. keypoints_are_valid / calculate_angle are evaluated
-            # per-leg since one leg may be valid while the other is occluded.
+            # Collect valid angles for each candidate leg.
             for side, joints in LEG_JOINTS.items():
                 if side not in calibration_angles:
                     continue
@@ -270,9 +188,7 @@ while True:
                     print(f"[calib][{side}] INVALID keypoints, skipped")
 
             if elapsed > CALIBRATION_DURATION:
-                # Pick the working leg: whichever has the larger observed
-                # range of motion. If TRACKED_SIDE forced a side, that's the
-                # only key present and this just uses it directly.
+                # Select the leg with the largest observed range of motion.
                 best_side, best_range, best_angles = None, -1.0, None
                 for side, angles in calibration_angles.items():
                     if len(angles) < 2:
@@ -325,10 +241,7 @@ while True:
                 last_valid_raw_angle = raw_angle
                 hold_frames_left = MAX_HOLD_FRAMES
             elif last_valid_raw_angle is not None and hold_frames_left > 0:
-                # Brief confidence dip (common right at the deepest point of
-                # a lateral lunge, due to partial self-occlusion): reuse the
-                # last valid angle instead of dropping the frame entirely,
-                # so a momentary dip doesn't erase the true minimum.
+                # Reuse the last valid angle during a brief confidence dip.
                 raw_angle = last_valid_raw_angle
                 hold_frames_left -= 1
                 if DEBUG:
@@ -384,10 +297,7 @@ while True:
                               f"({standing_confirm_count}/{STANDING_CONFIRM_FRAMES} to confirm standing)")
 
                     if standing_confirm_count < STANDING_CONFIRM_FRAMES:
-                        # Not confirmed yet -- could be a noise spike right
-                        # after an occlusion gap. Stay in "moving" and keep
-                        # appending to rep_buffer so we don't lose real data
-                        # if it turns out the patient really is still going.
+                        # Wait for consecutive confirmations before ending the rep.
                         pass
                     else:
                         state = "standing"
@@ -402,11 +312,7 @@ while True:
                             depth_target = active_reference.min()
                             depth_diff = abs(depth_achieved - depth_target)
 
-                            # Same two-zone scoring function used for the squat,
-                            # so results stay comparable in structure (score is
-                            # still 0-100%). The clinical meaning of the target
-                            # itself is weaker here, see the note in
-                            # evaluate_dataset_fixed_targets_lunge.py.
+                            # Use the shared two-zone scoring function.
                             accuracy_pct = calculate_depth_score(depth_diff)
 
                             last_result_text = f"Repetition: {accuracy_pct:.1f}% correct"

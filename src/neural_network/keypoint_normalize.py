@@ -1,33 +1,8 @@
 """
-Normalization utilities shared between offline training (MMFi dataset) and
-live webcam inference for the action-recognition + quality-scoring network.
+Shared keypoint normalization utilities for training and live inference.
 
-WHY NORMALIZE AT ALL:
-Feeding raw (pixel) keypoint coordinates into the network would let it
-"cheat" by learning things it shouldn't -- where in the frame the person
-happens to stand, how far they are from the camera, how tall they are --
-instead of the actual SHAPE of the pose, which is what we want it to
-classify/score. Normalizing removes translation and scale before the
-network ever sees the data.
-
-WHY THIS HAS TO BE ITS OWN SHARED MODULE:
-The whole point of training on MMFi and then running live on a webcam is
-that the network sees the SAME kind of input in both cases. If training
-used one normalization and the live script used another (or none), the
-network would face a distribution it never saw during training and
-predictions would be unreliable. So this module is meant to be imported
-by build_windowed_dataset.py (offline) AND by whatever live webcam script
-uses the trained model later -- never re-implemented in either place.
-
-Normalization steps, per frame:
-  1. Center every keypoint on the mid-hip point (average of LEFT_HIP and
-     RIGHT_HIP). Removes translation.
-  2. Scale every keypoint by the shoulder width (distance between
-     LEFT_SHOULDER and RIGHT_SHOULDER). Removes scale (distance from
-     camera, body-size differences between people).
-
-This file lives in <PROJECT_ROOT>/src/keypoint_normalize.py, alongside
-utils.py.
+Each frame is centered on the midpoint of the hips and scaled by shoulder
+width, making the network focus on pose shape rather than position or size.
 """
 import os
 import sys
@@ -39,10 +14,7 @@ from utils import (
     LEFT_HIP, RIGHT_HIP, LEFT_SHOULDER, RIGHT_SHOULDER, keypoints_are_valid,
 )
 
-# All 17 COCO keypoints are kept as network input (not just the 3-4 joints
-# the angle-based scripts use) -- the network can potentially pick up on
-# cues a single joint-angle can't (e.g. torso lean, arm swing during a
-# squat), so there's no reason to throw information away here.
+
 NUM_KEYPOINTS = 17
 NUM_COORDS = 2  # (x, y)
 FLAT_SIZE = NUM_KEYPOINTS * NUM_COORDS  # 34 -- the network's per-timestep input size
@@ -61,36 +33,24 @@ def frame_is_usable(frame_kp, frame_conf=None):
 
 
 def normalize_frame(frame_kp):
-    """Center on mid-hip and scale by shoulder width.
-
-    `frame_kp` is a (17, 2) array-like. Returns a (17, 2) numpy array, or
-    None if the frame is degenerate (near-zero shoulder width -- dividing
-    by it would blow up the coordinates instead of normalizing them)."""
+    """Center keypoints on the hips and scale them by shoulder width."""
     frame_kp = np.asarray(frame_kp, dtype=float)
 
+    # Remove translation by centering the pose on the midpoint of the hips.
     mid_hip = (frame_kp[LEFT_HIP] + frame_kp[RIGHT_HIP]) / 2.0
     shoulder_width = np.linalg.norm(frame_kp[LEFT_SHOULDER] - frame_kp[RIGHT_SHOULDER])
 
     if shoulder_width < MIN_SCALE:
         return None
 
+    # Remove scale differences by dividing all coordinates by shoulder width.
     centered = frame_kp - mid_hip
     scaled = centered / shoulder_width
     return scaled
 
 
 def normalize_sequence(keypoints_seq, kp_conf_seq=None):
-    """Normalize a whole (T, 17, 2) sequence.
-
-    Frames that fail the hip/shoulder validity check, or are degenerate,
-    are DROPPED (not zero-filled) -- same "skip rather than fabricate"
-    policy used throughout the rest of this codebase (see
-    keypoints_are_valid usage in the evaluate_dataset_*.py scripts). This
-    means the returned array can be shorter than the input.
-
-    Returns a (T', 17, 2) float array, T' <= T. T' can be 0 if no frame in
-    the sequence was usable.
-    """
+    # Keep only frames with the reference joints needed for reliable scaling.
     normalized = []
     for i, frame_kp in enumerate(keypoints_seq):
         frame_conf = kp_conf_seq[i] if kp_conf_seq is not None else None
@@ -106,8 +66,7 @@ def normalize_sequence(keypoints_seq, kp_conf_seq=None):
 
 
 def flatten_sequence(normalized_seq):
-    """(T, 17, 2) -> (T, 34). This flat, per-timestep vector is what
-    actually gets fed into the GRU (one 34-dim vector per frame)."""
+    # Flatten each frame while preserving the temporal order of the sequence.
     T = normalized_seq.shape[0]
     return normalized_seq.reshape(T, FLAT_SIZE)
 
@@ -119,24 +78,7 @@ MIRROR_PAIRS = [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15
 
 
 def mirror_normalized_sequence(normalized_seq):
-    """Horizontally mirror an already-normalized (T, 17, 2) sequence.
-
-    Since normalize_frame() already centers each frame on mid-hip, a clean
-    left-right flip is just negating x. But that alone isn't enough: after
-    negating x, the keypoint that used to sit at index 5 (anatomical LEFT
-    shoulder) now sits on the right side of the (flipped) image, while the
-    network still expects index 5 to mean "left shoulder". So each
-    left/right pair also needs to be swapped, or the mirrored pose would be
-    anatomically inconsistent (e.g. a mirrored right-lunge would show its
-    "left ankle" channel where a real left-lunge's left ankle would be, but
-    built from a right lunge's geometry -- silently wrong, not just visually
-    flipped).
-
-    Used as a training-time augmentation in build_windowed_dataset.py: it
-    both increases the amount of data per exercise, and, for the
-    left/right-specific exercises (lunge, limb extension), lets each side's
-    recordings contribute training data to the *other* side's class too.
-    """
+    # Flip the horizontal coordinate and swap anatomical left/right channels.
     mirrored = np.array(normalized_seq, dtype=float, copy=True)
     mirrored[:, :, 0] *= -1.0
     for i, j in MIRROR_PAIRS:

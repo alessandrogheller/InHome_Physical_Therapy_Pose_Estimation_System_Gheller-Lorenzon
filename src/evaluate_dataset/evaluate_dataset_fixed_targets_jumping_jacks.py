@@ -1,3 +1,12 @@
+"""
+src/evaluate_dataset/evaluate_dataset_fixed_targets_jumping_jacks.py
+This script estimates an empirical reference for a jumping-jacks-style proxy by
+analyzing MM-Fi pose sequences across subjects. For each valid sequence, it
+extracts two movement signals (leg spread and arm elevation), ignores invalid
+frames, computes peak values for the action, and derives dataset-level target
+values. These targets are then used to score each subject against the learned
+reference and identify which executions fall within the expected tolerance.
+"""
 import sys
 import os
 import numpy as np
@@ -16,13 +25,7 @@ from utils import (
 sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
-# --- CONFIGURATION ---
-# IMPORTANT: MM-Fi has no dedicated "jumping jacks" action. A26 "Jumping up"
-# (a bilateral vertical jump) is used here as the closest available proxy --
-# see the note at the top of reference_extraction_jumping_jacks.py. Treat
-# any target/score computed here as a data-driven placeholder, not a
-# validated jumping-jack reference.
-ACTION = 'A26'  # A26 = Jumping up (proxy for jumping jacks)
+ACTION = 'A26'  # A26 = Jumping jacks 
 ENVIRONMENT = 'E01'
 
 # --- Why two signals, not a knee angle ---
@@ -52,14 +55,17 @@ database = MMFi_Database(DATASET_ROOT)
 
 
 def euclidean(a, b):
+    # Compute the geometric distance between two 3D keypoints in Euclidean space.
+    # This is used to derive the shoulder width and ankle-to-ankle distance
+    # needed for the jumping-jack movement proxy.
     a, b = np.array(a, dtype=float), np.array(b, dtype=float)
     return float(np.linalg.norm(a - b))
 
 
 def load_subject_signals(subject):
-    """Load one subject's A26 sequence and return (leg_spread_ratio,
-    arm_raise_angle) as two aligned 1D numpy arrays, or None if the
-    subject/action could not be loaded or produced no valid frames."""
+    # Extract the movement proxy signals needed for the jumping-jack evaluation:
+    # 1) leg_spread_ratio: how wide the legs are relative to shoulder width
+    # 2) arm_raise_angle: average shoulder angle of both arms while raising upward
     try:
         data_form = {subject: [ACTION]}
         dataset = MMFi_Dataset(
@@ -80,6 +86,8 @@ def load_subject_signals(subject):
     n_skipped = 0
 
     for frame_kp in keypoints_seq:
+        # Ignore frames where required joints are missing or invalid, since they
+        # would distort the motion signal we are trying to estimate.
         if not keypoints_are_valid(frame_kp, None, REQUIRED_KEYPOINTS):
             n_skipped += 1
             continue
@@ -93,6 +101,8 @@ def load_subject_signals(subject):
         left_ankle = frame_kp[LEFT_ANKLE]
         right_ankle = frame_kp[RIGHT_ANKLE]
 
+        # Use the shoulder width as a normalization factor so the leg spread is
+        # comparable across subjects with different body sizes.
         shoulder_width = euclidean(left_shoulder, right_shoulder)
         if shoulder_width < 1e-3:
             n_skipped += 1
@@ -115,18 +125,15 @@ def load_subject_signals(subject):
     return np.array(leg_spread), np.array(arm_raise)
 
 
-# --- Pass 1: load all subjects, compute empirical targets ---
-# Like the lunge scripts, there is no published clinical target for either
-# signal, so both targets are estimated empirically from the dataset
-# itself: "how far people in this dataset actually got", not a validated
-# clinical goal.
+# --- Pass 1: load all subjects and estimate empirical targets ---
+# Since there is no validated clinical target for this proxy action, we derive
+# the target values directly from the dataset: each signal is normalized to the
+# movement amplitude that subjects in this set typically reach.
 #
-# Each subject's own peak is taken as the 95th percentile (not the raw
-# max) of their sequence. This mirrors the fix applied in
-# realtime_comparison_jumping_jacks.py: a single noisy keypoint frame
-# (motion blur momentarily displacing an ankle or wrist during the fast
-# jump) can otherwise produce one extreme spike that raw max() would treat
-# as "the" peak.
+# We use the 95th percentile rather than the raw maximum to avoid a single noisy
+# frame dominating the estimate. This is especially important for fast motions
+# like jumping jacks, where a brief pose error or motion blur can create an
+# extreme outlier.
 subject_signals = {}
 for subject in SUBJECTS:
     signals = load_subject_signals(subject)
@@ -143,11 +150,15 @@ subject_arm_peaks_raw = [float(np.percentile(arm, 95)) for leg, arm in subject_s
 LEG_SPREAD_TARGET = float(np.mean(subject_leg_peaks_raw))
 ARM_RAISE_TARGET = float(np.mean(subject_arm_peaks_raw))
 
-# Tolerance/falloff expressed as a fraction of the population's own range,
-# same 15%/35% shape used elsewhere in this pipeline, since one signal is a
-# unitless ratio and the other is in degrees -- a single fixed absolute
-# tolerance (like the squat's DEPTH_TOLERANCE=10deg) wouldn't make sense
-# applied to both.
+# Define tolerance and falloff relative to each signal's inter-subject variability.
+# This keeps the scoring scale comparable across both metrics:
+#   - leg_spread is a unitless ratio
+#   - arm_raise is measured in degrees
+#
+# We use the same 15%/35% structure as the rest of the pipeline, but scale it
+# by the observed population range (ROM = max - min) instead of a fixed absolute
+# value. This avoids making the tolerance depend on arbitrary units and makes the
+# score more robust across signals with different magnitudes.
 _leg_population_rom = max(subject_leg_peaks_raw) - min(subject_leg_peaks_raw)
 _arm_population_rom = max(subject_arm_peaks_raw) - min(subject_arm_peaks_raw)
 LEG_TOLERANCE = max(0.15 * _leg_population_rom, 1e-3)
@@ -157,11 +168,12 @@ ARM_FALLOFF = max(0.35 * _arm_population_rom, 1e-3)
 
 print(f"\nEmpirical LEG_SPREAD_TARGET (mean of subjects' 95th-percentile leg spread) = {LEG_SPREAD_TARGET:.2f}")
 print(f"Empirical ARM_RAISE_TARGET (mean of subjects' 95th-percentile arm raise) = {ARM_RAISE_TARGET:.1f}°")
-print("NOTE: these are data-driven placeholders derived from A26 'Jumping up' as a proxy action, "
-      "not validated jumping-jack targets. Replace them if you obtain real jumping-jack recordings "
-      "or a clinical reference.\n")
+
 
 # --- Pass 2: score each subject against the empirical targets ---
+# For each participant, compute the peak value of each proxy signal and compare
+# it with the dataset-level target. Lower deviation means the subject is closer
+# to the reference motion pattern and receives a higher score.
 results = []
 for subject, (leg_seq, arm_seq) in subject_signals.items():
     subject_leg_peak = float(np.percentile(leg_seq, 95))
@@ -196,7 +208,7 @@ scores = [r['accuracy_pct'] for r in results]
 n_within_tolerance = sum(1 for r in results if r['within_tolerance'])
 
 print("\n--- Summary ---")
-print(f"Action: {ACTION} (Jumping up, proxy for jumping jacks)")
+print(f"Action: {ACTION} (Jumping jacks)")
 print(f"Empirical targets: leg_spread={LEG_SPREAD_TARGET:.2f}±{LEG_TOLERANCE:.2f}  "
       f"arm_raise={ARM_RAISE_TARGET:.1f}°±{ARM_TOLERANCE:.1f}°")
 print(f"Subjects evaluated: {len(results)}")

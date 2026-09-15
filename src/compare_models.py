@@ -1,24 +1,8 @@
 """
-Compares the two trained action-quality models (GRU vs TCN) on the SAME
-validation split from action_quality_dataset.npz, so the numbers are
-directly comparable.
+Compare the trained GRU and TCN models on the same validation data.
 
-Run AFTER both:
-  train_action_quality_net.py -> action_quality_net.pt   (GRU)
-  train_action_quality_tcn.py -> action_quality_tcn.pt    (TCN)
-
-Reports, for each model:
-  - validation accuracy (classification head)
-  - validation score MAE (regression head, 0-100 scale)
-  - per-class accuracy (helps spot if one architecture struggles on a
-    specific exercise, e.g. mixing up lunge_left / lunge_right)
-  - number of parameters
-  - average CPU inference time per single window (batch size 1), since
-    that is what matters for the live webcam script running on a
-    non-performant machine, not training time
-
-This file lives in <PROJECT_ROOT>/src/compare_models.py, alongside
-train_action_quality_net.py and train_action_quality_tcn.py.
+Report accuracy, score error, per-class performance, parameter count, and
+single-window CPU inference latency.
 """
 import os
 import sys
@@ -36,14 +20,12 @@ from utils import PROJECT_ROOT, GRU_DIR, TCN_DIR
 from train_action_quality_net import ActionQualityNet, WindowDataset as GRUWindowDataset
 from train_action_quality_tcn import ActionQualityTCN, WindowDataset as TCNWindowDataset
 
-# We pick the dataset from the GRU directory, but both architectures were trained on the same dataset
+# Both architectures use this shared validation dataset.
 DATASET_NPZ = os.path.join(GRU_DIR, 'action_quality_dataset.npz')
 GRU_CHECKPOINT = os.path.join(GRU_DIR, 'action_quality_net.pt')
 TCN_CHECKPOINT = os.path.join(TCN_DIR, 'action_quality_tcn.pt')
 
-# CPU on purpose: the comparison that matters for a non-performant machine
-# is CPU inference speed, since that's what realtime_inference_action_quality.py
-# actually runs on during a live session.
+# Measure CPU performance because this matches the live inference setting.
 DEVICE = torch.device('cpu')
 
 N_TIMING_RUNS = 200  # single-window forward passes used to estimate latency
@@ -78,6 +60,7 @@ def load_tcn(checkpoint_path):
 
 @torch.no_grad()
 def evaluate(model, loader, num_classes):
+    """Compute overall and per-class validation metrics."""
     correct = 0
     total = 0
     score_abs_error_sum = 0.0
@@ -110,13 +93,10 @@ def evaluate(model, loader, num_classes):
 
 @torch.no_grad()
 def measure_latency(model, sample_window, n_runs=N_TIMING_RUNS):
-    """Average wall-clock time for a single-window forward pass on CPU --
-    the realistic per-frame cost during live inference (see
-    realtime_inference_action_quality.py, which runs one forward pass per
-    completed window)."""
+    """Measure the average CPU time for one model forward pass."""
     x = sample_window.unsqueeze(0)  # (1, window_length, input_size)
 
-    # Warm-up (first call(s) can be slower due to lazy initialization).
+    # Warm up before timing to avoid initialization overhead.
     for _ in range(5):
         model(x)
 
@@ -140,6 +120,7 @@ def main():
               "train_action_quality_tcn.py).")
         return
 
+    # Load the shared validation split and both trained checkpoints.
     data = np.load(DATASET_NPZ, allow_pickle=True)
     class_names = list(data['class_names'])
     num_classes = len(class_names)
@@ -147,11 +128,7 @@ def main():
     gru_model, gru_ckpt = load_gru(GRU_CHECKPOINT)
     tcn_model, tcn_ckpt = load_tcn(TCN_CHECKPOINT)
 
-    # Each architecture has its own WindowDataset class (they're identical
-    # in behavior, just imported from their respective training scripts) --
-    # using each model's own dataset wrapper keeps this script decoupled
-    # from having to know both scale scores the same way if that ever
-    # changes.
+    # Use each model's dataset wrapper to apply its training-time target scaling.
     gru_val_ds = GRUWindowDataset(data['X_val'], data['y_class_val'], data['y_score_val'])
     tcn_val_ds = TCNWindowDataset(data['X_val'], data['y_class_val'], data['y_score_val'])
     gru_val_loader = DataLoader(gru_val_ds, batch_size=64, shuffle=False)
@@ -165,7 +142,8 @@ def main():
     gru_params = sum(p.numel() for p in gru_model.parameters())
     tcn_params = sum(p.numel() for p in tcn_model.parameters())
 
-    sample_window = gru_val_ds.X[0]  # same underlying data for both, just used for timing
+    # Time both models on the same validation window.
+    sample_window = gru_val_ds.X[0]
     gru_latency_ms = measure_latency(gru_model, sample_window)
     tcn_latency_ms = measure_latency(tcn_model, sample_window)
 

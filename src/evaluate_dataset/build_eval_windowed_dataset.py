@@ -11,18 +11,21 @@ import csv
 import numpy as np
 
 # --- Path anchoring -------------------------------------------------
+# Ensure the project root and neural-network utilities are importable from any script location.
+# This makes it possible to run the dataset builder from different working directories.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _SRC_DIR = os.path.dirname(_THIS_DIR)
 _NN_DIR = os.path.join(_SRC_DIR, 'neural_network')
 for _p in (_SRC_DIR, _NN_DIR):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-        
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import PROJECT_ROOT
 from keypoint_normalize import normalize_sequence, flatten_sequence, FLAT_SIZE
 
+# Root folders for evaluation data and the generated output dataset.
 EVAL_DATASET_ROOT = os.path.join(PROJECT_ROOT, 'eval_dataset')
 EVAL_LABELS_CSV = os.path.join(PROJECT_ROOT, 'eval_quality_labels.csv')
 OUTPUT_NPZ = os.path.join(PROJECT_ROOT, 'eval_action_quality_dataset.npz')
@@ -36,6 +39,8 @@ WINDOW_STRIDE = 10
 
 
 def load_labels(csv_path):
+    # Read the quality labels generated separately for the evaluation set.
+    # The dictionary maps each (subject, action) pair to its associated score.
     labels = {}
     with open(csv_path, newline='') as f:
         for row in csv.DictReader(f):
@@ -44,6 +49,8 @@ def load_labels(csv_path):
 
 
 def make_windows(seq_flat, length, stride):
+    # Build overlapping temporal windows from a flattened pose sequence.
+    # Each window contains consecutive frames and preserves the original feature layout.
     T = seq_flat.shape[0]
     if T < length:
         return np.zeros((0, length, seq_flat.shape[1]), dtype=np.float32)
@@ -52,13 +59,17 @@ def make_windows(seq_flat, length, stride):
 
 
 def main():
+    # Exit early if the evaluation labels are missing, since they are required to
+    # assign quality scores to the generated windows.
     if not os.path.exists(EVAL_LABELS_CSV):
         print(f"ERROR: {EVAL_LABELS_CSV} not found. Run score_eval_subjects.py first.")
         sys.exit(1)
     labels = load_labels(EVAL_LABELS_CSV)
 
+    # Accumulate all windows and labels for the final evaluation dataset.
     X_all, y_class_all, y_score_all, subject_all = [], [], [], []
 
+    # Process each subject and each exercise independently.
     for subject_id in sorted(os.listdir(EVAL_DATASET_ROOT)):
         subject_dir = os.path.join(EVAL_DATASET_ROOT, subject_id)
         if not os.path.isdir(subject_dir):
@@ -71,20 +82,24 @@ def main():
             if not os.path.exists(kp_path):
                 continue
 
+            # Load the raw keypoint sequence and normalize it before windowing.
             raw_seq = np.load(kp_path)
             normalized = normalize_sequence(raw_seq)  # no per-keypoint conf needed here
             if normalized.shape[0] < WINDOW_LENGTH:
                 print(f"  {subject_id}/{exercise_name}: only {normalized.shape[0]} usable frames, skipping.")
                 continue
 
+            # Flatten the normalized pose data into a format compatible with the model input.
             flat = flatten_sequence(normalized)
             windows = make_windows(flat, WINDOW_LENGTH, WINDOW_STRIDE)
             if windows.shape[0] == 0:
                 continue
 
+            # Map the exercise name to the class index expected by the network.
             class_idx = CLASS_NAMES.index(exercise_name)
             score = labels[key]
 
+            # Store each window together with its class label and quality score.
             X_all.append(windows)
             y_class_all.append(np.full(windows.shape[0], class_idx, dtype=np.int64))
             y_score_all.append(np.full(windows.shape[0], score, dtype=np.float32))
@@ -92,14 +107,17 @@ def main():
 
             print(f"  {subject_id}/{exercise_name}: {windows.shape[0]} windows (score={score:.1f}%)")
 
+    # Stop if no valid evaluation windows were generated.
     if not X_all:
         print("No eval windows produced. Aborting.")
         sys.exit(1)
 
+    # Concatenate all partial arrays into a single dataset for evaluation.
     X = np.concatenate(X_all, axis=0)
     y_class = np.concatenate(y_class_all, axis=0)
     y_score = np.concatenate(y_score_all, axis=0)
 
+    # Save the evaluation dataset in NPZ format for later model assessment.
     np.savez_compressed(
         OUTPUT_NPZ,
         class_names=np.array(CLASS_NAMES),

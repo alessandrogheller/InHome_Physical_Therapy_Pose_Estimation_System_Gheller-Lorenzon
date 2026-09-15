@@ -1,11 +1,5 @@
 """
-Shared utilities for the InHome Physical Therapy Pose Estimation System.
-
-Centralizing these functions ensures that the offline evaluation (MMFi
-dataset) and the online/live scoring (webcam) use *exactly* the same
-geometry and scoring logic, so the two are actually comparable.
-
-This file lives in <PROJECT_ROOT>/src/utils.py
+Shared geometry, scoring, and keypoint utilities for offline and live evaluation.
 """
 import os
 import numpy as np
@@ -22,11 +16,8 @@ os.makedirs(GRU_DIR, exist_ok=True)
 os.makedirs(TCN_DIR, exist_ok=True)
 
 def get_reference_path(action_name):
-    """Build a path for an action-specific reference curve, e.g.
-    get_reference_path('lunge') -> PROJECT_ROOT/lunge_reference.npy
-    Lets different actions (squat, lunge, ...) keep separate reference
-    files without overwriting each other."""
-    os.makedirs(REFERENCES_DIR, exist_ok=True) # Ensure the references directory exists
+    """Return the path for an action-specific reference curve."""
+    os.makedirs(REFERENCES_DIR, exist_ok=True)
     return os.path.join(REFERENCES_DIR, f'{action_name}_reference.npy')
 
 

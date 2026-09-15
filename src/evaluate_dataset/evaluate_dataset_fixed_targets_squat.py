@@ -1,3 +1,12 @@
+"""
+src/evaluate_dataset/evaluate_dataset_fixed_targets_squat.py
+This script evaluates squat performance by extracting the knee-angle trajectory
+from MM-Fi reference sequences. For each subject, it measures the minimum knee
+flexion (deepest squat) and the maximum standing angle, then compares them to
+fixed dataset targets. The score reflects how closely the execution matches the
+expected squat pattern and whether the movement is within the tolerance range for
+acceptable depth.
+"""
 import sys
 import os
 import numpy as np
@@ -15,18 +24,18 @@ sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
 # --- CONFIGURATION ---
-# DATASET_ROOT now comes from utils.py (PROJECT_ROOT/dataset/MMFi_Dataset),
-# no more hardcoded Windows path -> works on any machine/OS.
 ACTION = 'A12'  # A12 = Squat
 ENVIRONMENT = 'E01'
 
 # --- Fixed clinical target angles (manually defined, not computed from data) ---
+# The standing target represents the fully extended knee angle between repetitions,
+# while the squat depth target reflects the clinically accepted knee flexion.
 STANDING_TARGET = 180.0
 STANDING_TOLERANCE = 1.0
 
 DEPTH_TARGET = 95.0
-# DEPTH_TOLERANCE / falloff are imported from utils.py so this script uses the
-# exact same scoring function as the live webcam pipeline (realtime_comparison.py).
+# DEPTH_TOLERANCE and the falloff behavior are imported from utils.py so this
+# script uses the same scoring function as the live webcam pipeline.
 
 # Auto-detect subject folders inside the environment
 environment_path = os.path.join(DATASET_ROOT, ENVIRONMENT)
@@ -38,6 +47,7 @@ print(f"Found {len(SUBJECTS)} subjects in {ENVIRONMENT}: {SUBJECTS}\n")
 
 database = MMFi_Database(DATASET_ROOT)
 
+# Evaluate each subject independently and collect the resulting quality metrics.
 results = []
 
 for subject in SUBJECTS:
@@ -56,11 +66,6 @@ for subject in SUBJECTS:
         angles = []
         n_skipped = 0
         for frame_kp in keypoints_seq:
-            # MMFi does not expose a per-keypoint confidence score, so
-            # kp_conf=None here -> keypoints_are_valid() falls back to the
-            # "not all-zero" check. If your version of MMFi does provide a
-            # confidence array, pass it here instead of None for a stricter,
-            # more robust filter (same logic used live in realtime_comparison.py).
             if keypoints_are_valid(frame_kp, None, [LEFT_HIP, LEFT_KNEE, LEFT_ANKLE]):
                 hip = frame_kp[LEFT_HIP]
                 knee = frame_kp[LEFT_KNEE]
@@ -75,8 +80,8 @@ for subject in SUBJECTS:
         if n_skipped > 0:
             print(f"{subject}: skipped {n_skipped}/{len(keypoints_seq)} frames with missing/invalid keypoints.")
 
-        # No calibration offset here: all MMFi subjects share the same
-        # camera setup within the dataset, unlike the live webcam case.
+        # The MMFi dataset uses a consistent acquisition setup, so no additional
+        # calibration offset is needed here as in the live webcam pipeline.
         subject_standing = max(angles)
         subject_depth = min(angles)
 
@@ -86,8 +91,9 @@ for subject in SUBJECTS:
         standing_within_tolerance = standing_diff <= STANDING_TOLERANCE
         depth_within_tolerance = depth_diff <= DEPTH_TOLERANCE
 
-        # Score based on depth (the clinically meaningful metric), using the
-        # shared two-zone scoring function from utils.py.
+        # Score based on depth, which is the clinically meaningful metric for the
+        # squat. The shared depth-based scoring function from utils.py is used to
+        # keep the behavior aligned with the rest of the project.
         accuracy_pct = calculate_depth_score(depth_diff)
 
         results.append({

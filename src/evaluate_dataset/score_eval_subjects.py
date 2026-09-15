@@ -1,13 +1,8 @@
 """
 src/evaluate_dataset/score_eval_subjects.py
 
-Reads every extracted eval_dataset/<subject>/<exercise>/keypoints.npy,
-computes the SAME angle-based (or dual-signal, for jumping jacks) quality
-score used during training, but against the targets frozen in
-quality_targets.json -- NOT recomputed on these new subjects. This gives
-one 'true' score per (subject, exercise) video, written to
-eval_quality_labels.csv in the same format as quality_labels.csv, so
-build_eval_windowed_dataset.py can reuse the same loading code.
+Score the extracted evaluation videos against the fixed targets in
+quality_targets.json and save one quality label per subject and exercise.
 """
 import os
 import sys
@@ -47,6 +42,7 @@ def euclidean(a, b):
 
 
 def angle_series(kp_seq, conf_seq, joints):
+    # Keep only frames where all joints needed for the angle are reliable.
     hip_i, knee_i, ankle_i = joints
     angles = []
     for kp, conf in zip(kp_seq, conf_seq):
@@ -56,6 +52,8 @@ def angle_series(kp_seq, conf_seq, joints):
 
 
 def jj_signals(kp_seq, conf_seq):
+    # Normalize ankle distance by shoulder width so the leg-spread signal is
+    # less sensitive to the subject's distance from the camera.
     leg_spread, arm_raise = [], []
     for kp, conf in zip(kp_seq, conf_seq):
         if not keypoints_are_valid(kp, conf, JJ_REQUIRED):
@@ -72,6 +70,8 @@ def jj_signals(kp_seq, conf_seq):
 
 def score_video(exercise_name, kp_seq, conf_seq, targets):
     if exercise_name in LEG_JOINTS:
+        # For squats and lunges, compare the minimum knee angle with the fixed
+        # target depth reached during the movement.
         angles = angle_series(kp_seq, conf_seq, LEG_JOINTS[exercise_name])
         if len(angles) == 0:
             return None
@@ -79,6 +79,8 @@ def score_video(exercise_name, kp_seq, conf_seq, targets):
         return calculate_depth_score(depth_diff)
 
     if exercise_name in ARM_JOINTS:
+        # Arm extensions are scored at both extremes: the resting position and
+        # the most extended position observed in the sequence.
         angles = angle_series(kp_seq, conf_seq, ARM_JOINTS[exercise_name])
         if len(angles) == 0:
             return None
@@ -87,6 +89,8 @@ def score_video(exercise_name, kp_seq, conf_seq, targets):
         return (calculate_depth_score(resting_diff) + calculate_depth_score(extension_diff)) / 2.0
 
     if exercise_name == 'jumping_jacks':
+        # Use high percentiles to represent the open-leg and raised-arm phases
+        # while reducing the influence of isolated noisy frames.
         leg, arm = jj_signals(kp_seq, conf_seq)
         if len(leg) == 0:
             return None
@@ -100,6 +104,8 @@ def score_video(exercise_name, kp_seq, conf_seq, targets):
 
 
 def main():
+    # Targets must be generated from the training data beforehand and remain
+    # fixed while the evaluation subjects are being scored.
     if not os.path.exists(TARGETS_JSON):
         print(f"ERROR: {TARGETS_JSON} not found. Run the updated generate_quality_labels.py first.")
         sys.exit(1)
@@ -107,6 +113,8 @@ def main():
         all_targets = json.load(f)
 
     rows = []
+    # Traverse every extracted subject/exercise pair and score only complete
+    # directories containing both keypoints and confidence arrays.
     for subject_id in sorted(os.listdir(EVAL_DATASET_ROOT)):
         subject_dir = os.path.join(EVAL_DATASET_ROOT, subject_id)
         if not os.path.isdir(subject_dir):
@@ -135,6 +143,8 @@ def main():
         print("No eval scores computed. Aborting.")
         sys.exit(1)
 
+    # Write the results in the same simple format consumed by the evaluation
+    # dataset-building scripts.
     with open(OUTPUT_CSV, 'w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['subject', 'action', 'score'])
