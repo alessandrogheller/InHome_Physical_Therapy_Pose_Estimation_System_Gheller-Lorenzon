@@ -3,6 +3,28 @@ Train a multi-task GRU to classify exercises and predict execution quality.
 Versione aggiornata: augmentation a runtime, dropout, weight decay,
 LR scheduler, early stopping, gradient clipping, selezione checkpoint
 basata anche sull'accuratezza di classificazione.
+
+--- UPDATE (score-quality fix) ------------------------------------------
+Two changes on top of the previous version, both aimed at the GRU's
+compressed score output (std=9.4%, range 61.9-92.3% observed on the eval
+set) rather than at classification, which was already solid (86.7% acc):
+
+1. SCORE_LOSS_WEIGHT raised 0.5 -> 1.2. With classification saturating
+   near 100% by epoch 2 (see the "Overfitting pattern" note in project
+   memory), the combined loss was dominated by a classification term that
+   had nothing left to learn, starving the regression head of gradient
+   signal for most of training. Weighting the score loss more heavily
+   forces the shared GRU encoder to keep improving score-relevant features
+   even after classification has converged.
+
+2. Checkpoint selection criterion changed from (val_acc, then val_loss) to
+   (val score_mae, then val_acc). The previous criterion was implicitly
+   optimizing for the metric that was already fine and ignoring the one
+   that wasn't -- a checkpoint could look "best" purely from a
+   classification uptick while its score predictions got worse. Now the
+   primary selection signal is the metric we actually want to fix;
+   accuracy is kept as a tie-breaker so we don't regress classification
+   while chasing score_mae.
 """
 import os
 import sys
@@ -31,7 +53,10 @@ GRAD_CLIP_NORM = 5.0    # nuovo.
 EARLY_STOP_PATIENCE = 15  # nuovo: epoche senza miglioramento prima di fermarsi.
 LR_SCHEDULER_PATIENCE = 6
 
-SCORE_LOSS_WEIGHT = 0.5
+# Raised from 0.5: classification converges almost immediately (see module
+# docstring), so a higher weight keeps the regression head from being
+# starved of gradient signal for the rest of training.
+SCORE_LOSS_WEIGHT = 1.2
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -149,8 +174,14 @@ def main():
         optimizer, mode='min', factor=0.5, patience=LR_SCHEDULER_PATIENCE
     )
 
-    best_val_loss = float('inf')
+    # Checkpoint selection now targets score_mae first (the metric that was
+    # actually underperforming), with accuracy as a tie-breaker so
+    # classification quality isn't allowed to regress while we chase a
+    # better score estimate. val_loss is still tracked/printed for
+    # visibility but no longer drives the selection.
+    best_score_mae = float('inf')
     best_val_acc = 0.0
+    best_val_loss = float('inf')
     epochs_without_improvement = 0
 
     for epoch in range(1, MAX_EPOCHS + 1):
@@ -164,13 +195,15 @@ def main():
               f"val: loss={val_metrics['loss']:.4f} acc={val_metrics['accuracy']*100:5.1f}% "
               f"score_mae={val_metrics['score_mae']:4.1f}")
 
-        # Criterio di selezione: prima l'accuratezza di classificazione
-        # (il problema piu' grave osservato), poi la loss come tie-breaker.
-        improved = (val_metrics['accuracy'] > best_val_acc) or (
-            val_metrics['accuracy'] == best_val_acc and val_metrics['loss'] < best_val_loss
+        # Criterio di selezione: score_mae prima di tutto (il problema
+        # osservato sul set di valutazione), poi l'accuratezza come
+        # tie-breaker per non peggiorare la classificazione.
+        improved = (val_metrics['score_mae'] < best_score_mae) or (
+            val_metrics['score_mae'] == best_score_mae and val_metrics['accuracy'] > best_val_acc
         )
 
         if improved:
+            best_score_mae = val_metrics['score_mae']
             best_val_acc = val_metrics['accuracy']
             best_val_loss = val_metrics['loss']
             epochs_without_improvement = 0
@@ -182,8 +215,8 @@ def main():
                 'hidden_size': HIDDEN_SIZE,
                 'num_layers': NUM_LAYERS,
             }, MODEL_PATH)
-            print(f"           -> new best (val_acc={best_val_acc*100:.1f}%, "
-                  f"val_loss={best_val_loss:.4f}), saved checkpoint")
+            print(f"           -> new best (val_score_mae={best_score_mae:.2f}, "
+                  f"val_acc={best_val_acc*100:.1f}%, val_loss={best_val_loss:.4f}), saved checkpoint")
         else:
             epochs_without_improvement += 1
             if epochs_without_improvement >= EARLY_STOP_PATIENCE:
