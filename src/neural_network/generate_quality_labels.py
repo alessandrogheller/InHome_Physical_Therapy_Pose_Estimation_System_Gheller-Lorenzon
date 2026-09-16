@@ -14,7 +14,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils import (
-    PROJECT_ROOT, DATASET_ROOT,
+    PROJECT_ROOT, DATASET_ROOT, GRU_DIR, TCN_DIR,
     LEFT_HIP, LEFT_KNEE, LEFT_ANKLE, RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE,
     LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST, RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST,
     calculate_angle, calculate_depth_score, keypoints_are_valid,
@@ -23,7 +23,10 @@ from utils import (
 sys.path.append(os.path.join(PROJECT_ROOT, 'mmfi_lib'))
 from mmfi import MMFi_Database, MMFi_Dataset
 
-OUTPUT_CSV = os.path.join(PROJECT_ROOT, 'quality_labels.csv')
+OUTPUT_CSVS = [
+    os.path.join(GRU_DIR, 'quality_labels.csv'),
+    os.path.join(TCN_DIR, 'quality_labels.csv'),
+]
 TARGETS_JSON = os.path.join(PROJECT_ROOT, 'quality_targets.json')
 
 # --- Action definitions -----------------------------------------------
@@ -241,11 +244,15 @@ def main():
         sys.exit(1)
 
     # Save one quality label for each valid subject/action pair.
-    with open(OUTPUT_CSV, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['subject', 'action', 'score'])
-        writer.writerows(rows)
-    print(f"Saved {len(rows)} (subject, action, score) rows to: {OUTPUT_CSV}")
+    # Written identically into both GRU/ and TCN/ so build_windowed_dataset.py
+    # (which looks for it in GRU_DIR) and any TCN-side inspection both find it,
+    # without needing the two training pipelines to share a folder.
+    for output_csv in OUTPUT_CSVS:
+        with open(output_csv, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['subject', 'action', 'score'])
+            writer.writerows(rows)
+        print(f"Saved {len(rows)} (subject, action, score) rows to: {output_csv}")
 
     # Save the targets used to compute the scores so new subjects can be scored
     # against the same reference values later.

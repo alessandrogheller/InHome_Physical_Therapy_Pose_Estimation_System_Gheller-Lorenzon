@@ -84,3 +84,23 @@ def mirror_normalized_sequence(normalized_seq):
     for i, j in MIRROR_PAIRS:
         mirrored[:, [i, j], :] = mirrored[:, [j, i], :]
     return mirrored
+
+def augment_window(window_flat, noise_std=0.02, scale_range=0.10, rotate_deg=10.0):
+    """window_flat: (T, 34) normalizzato e appiattito -> versione augmentata."""
+    T = window_flat.shape[0]
+    kp = window_flat.reshape(T, NUM_KEYPOINTS, NUM_COORDS).copy()
+
+    # scala casuale
+    scale = 1.0 + np.random.uniform(-scale_range, scale_range)
+    kp *= scale
+
+    # piccola rotazione casuale (invarianza a leggeri disallineamenti di camera)
+    theta = np.radians(np.random.uniform(-rotate_deg, rotate_deg))
+    c, s = np.cos(theta), np.sin(theta)
+    rot = np.array([[c, -s], [s, c]])
+    kp = kp @ rot.T
+
+    # jitter gaussiano
+    kp += np.random.normal(0.0, noise_std, size=kp.shape)
+
+    return kp.reshape(T, FLAT_SIZE).astype(np.float32)
