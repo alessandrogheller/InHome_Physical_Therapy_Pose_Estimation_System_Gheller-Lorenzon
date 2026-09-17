@@ -8,7 +8,6 @@ import numpy as np
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATASET_ROOT = os.path.join(PROJECT_ROOT, 'dataset', 'MMFi_Dataset')
 MODEL_PATH = os.path.join(PROJECT_ROOT, 'yolov8n-pose.pt')
-LOG_DIR = os.path.join(PROJECT_ROOT, 'logs')
 REFERENCES_DIR = os.path.join(PROJECT_ROOT, 'references')
 GRU_DIR = os.path.join(PROJECT_ROOT, 'GRU')
 TCN_DIR = os.path.join(PROJECT_ROOT, 'TCN')
