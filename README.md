@@ -9,17 +9,19 @@ A pose-estimation system for home-based physical therapy: it evaluates, in real 
 1. [Overview](#overview)
 2. [Repository Structure](#repository-structure)
 3. [Dataset](#dataset)
-4. [Installation](#installation)
-5. [How to Run the Project](#how-to-run-the-project)
-6. [Camera and Scene Setup](#camera-and-scene-setup)
-7. [System Input and Output](#system-input-and-output)
-8. [MM-Fi Dataset Evaluation Pipeline](#mm-fi-dataset-evaluation-pipeline)
-9. [Neural Pipeline (GRU vs TCN)](#neural-pipeline-gru-vs-tcn)
-10. [Metrics and Baselines](#metrics-and-baselines)
-11. [Third-Party Code and Libraries](#third-party-code-and-libraries)
-12. [AI/LLM Tool Usage](#aillm-tool-usage)
-13. [References](#references)
-14. [Known Limitations](#known-limitations)
+4. [Evaluation Dataset](#evaluation-dataset)
+5. [Ground Truth](#ground-truth)
+6. [Installation](#installation)
+7. [How to Run the Project](#how-to-run-the-project)
+8. [Camera and Scene Setup](#camera-and-scene-setup)
+9. [System Input and Output](#system-input-and-output)
+10. [MM-Fi Dataset Evaluation Pipeline](#mm-fi-dataset-evaluation-pipeline)
+11. [Neural Pipeline (GRU vs TCN)](#neural-pipeline-gru-vs-tcn)
+12. [Metrics and Baselines](#metrics-and-baselines)
+13. [Third-Party Code and Libraries](#third-party-code-and-libraries)
+14. [AI/LLM Tool Usage](#aillm-tool-usage)
+15. [References](#references)
+16. [Known Limitations](#known-limitations)
 
 ---
 
@@ -138,8 +140,77 @@ The dataset is **not included in this repository** because of its size and is ex
 ```
 `src/utils.py` automatically defines `DATASET_ROOT = <PROJECT_ROOT>/dataset/MMFi_Dataset`.
 
-The evaluation dataset is **not included as well** because it is an internal dataset to verify the estimation of the three methods.
+---
 
+## Evaluation Dataset
+
+MM-Fi is used only for training, threshold calibration, and reference-curve construction; it is **not** used as the final evaluation set. A separate evaluation dataset was
+therefore built from scratch, specifically for testing the three scoring
+methods (rule-based, GRU, TCN) on data the models had never seen during
+training or reference extraction.
+
+### Composition
+
+- **5 subjects** (`S1`-`S5`), none of which appear in the MM-Fi training
+  or reference data.
+- Each subject performed all **6 supported exercises**: squat,
+  left/right lunge, left/right limb extension, jumping jacks.
+- Each subject performed 3-5 repetitions per exercise.
+
+### Recording conditions
+
+- See See the [Camera and Scene setup](#camera-and-scene-setup) section below for the complete camera and ambient position position
+- Videos were recorded at 30 FPS and processed with
+  `extract_keypoints_from_video.py`, which re-samples frames to
+  approximately the same ~10 fps keypoint rate used by MM-Fi
+  (`MMFI_APPROX_FPS`), keeping the two data sources comparable.
+
+
+The evaluation dataset itself is not included in the repository (see
+`.gitignore`) for the same reason MM-Fi is not included.
+It is possible to place an evaluation dataset of your own, with the same exercise taken into account, in the following location:
+```
+<project root>/eval_dataset/
+    S1/jumping_jacks/confidence.npy
+    S1/jumping_jacks/keypoints.npy 
+    S1/limb_extension_left/confidence.npy
+    ...
+```
+---
+## Ground Truth
+
+Physical therapy exercise correctness has no single objective
+definition without a licensed physiotherapist's clinical judgment,
+which is outside the scope of this project and this team's expertise.
+
+The project does **not** attempt to define a clinically validated "correct"
+movement. Instead, it fixes **one arbitrary but consistent reference
+movement per exercise**, used identically across the rule-based,
+GRU, and TCN pipelines so that the three methods remain fairly
+comparable to each other -- not to a medical ground truth.
+
+### How the reference movement is defined
+
+For the squat, a single fixed clinical-looking value (95° of knee
+flexion) is used as a simple, illustrative baseline target (see
+`evaluate_dataset_fixed_targets_squat.py`).
+
+For every other exercise (lunges, limb extensions, jumping jacks), no
+such published reference exists, so the "correct" movement is instead
+estimated **empirically from the MM-Fi population itself**: for each
+signal of interest (e.g. minimum knee angle for a lunge, or the
+95th-percentile leg-spread/arm-raise for jumping jacks), the target is
+the **mean of that signal across all MM-Fi subjects** who performed the
+exercise
+
+This choice means:
+- The "ground truth" quality label used to train and evaluate all three
+  methods is a **population-relative heuristic score**
+  (`calculate_depth_score()` in `utils.py`), not a clinically annotated
+  label.
+- A subject's score reflects how close their movement is to the
+  *average* MM-Fi subject's movement for that exercise, not to a
+  medically validated form.
 ---
 
 ## Installation
@@ -289,8 +360,9 @@ The quality target is therefore a **weak label**, not a clinically validated gro
 ## Metrics and Baselines
 
 - **Quality score metric**: the two-zone `calculate_depth_score()` function assigns scores from 100% to 80% linearly within `DEPTH_TOLERANCE`, then decreases from 80% to 0% across `DEPTH_FALLOFF_RANGE`. This is an internal project metric used consistently in both offline and online evaluation.
-- **Baseline**: the squat uses a fixed target of 95° as a simple baseline based on the clinical value used by the project. For the other exercises, where no published clinical target is available, the baseline is the empirical target calculated as the mean of the MM-Fi population by `evaluate_dataset_fixed_targets_*.py`.
-- **Model comparison**: three distinct approaches are compared on the same subjects/actions — the rule-based/geometric method (a traditional CV approach) and the two deep-learning models, GRU and TCN — using classification accuracy, quality-score MAE on the 0–100 scale, parameter count, and CPU latency per window. This comparison is **not implemented as a script in this repository**: it is carried out externally, using the reference curves in `references/` (rule-based) and the two checkpoints produced by `train_action_quality_net.py` / `train_action_quality_tcn.py` (GRU/TCN) as inputs. The resulting numbers and discussion are reported in the final presentation/project report, not in this repository.
+- **Baseline**: the **rule-based/geometric method** serves as the
+  project's baseline condition: the squat uses a fixed target of 95° as a simple baseline based on the clinical value used by the project. For the other exercises, where no published clinical target is available, the baseline is the empirical target calculated as the mean of the MM-Fi population by `evaluate_dataset_fixed_targets_*.py`.
+- **Model comparison**: three distinct approaches are compared on the same subjects/actions — the rule-based/geometric method (a traditional CV approach) and the two deep-learning models, GRU and TCN — using classification accuracy, quality-score MAE on the 0–100 scale, parameter count, and CPU latency per window. This comparison is carried out by the script 'evaluate_on_new_subjects_with_3_methods', using the reference curves in `references/` (rule-based) and the two checkpoints produced by `train_action_quality_net.py` / `train_action_quality_tcn.py` (GRU/TCN) as inputs. The resulting numbers and discussion are reported in the final presentation/project report, not in this repository.
 - **Pose-estimation metrics**: `mmfi_lib/evaluate.py` also provides the standard MPJPE and PA-MPJPE metrics from the original MM-Fi toolkit, including Procrustes alignment, for a possible direct evaluation of pose-estimation quality against the dataset's 3D ground truth.
 
 ---
