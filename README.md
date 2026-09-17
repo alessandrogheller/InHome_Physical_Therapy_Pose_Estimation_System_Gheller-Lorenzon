@@ -159,7 +159,7 @@ training or reference extraction.
 
 ### Recording conditions
 
-- See See the [Camera and Scene setup](#camera-and-scene-setup) section below for the complete camera and ambient position position
+- See the [Camera and Scene setup](#camera-and-scene-setup) section below for the complete camera and ambient position position
 - Videos were recorded at 30 FPS and processed with
   `extract_keypoints_from_video.py`, which re-samples frames to
   approximately the same ~10 fps keypoint rate used by MM-Fi
