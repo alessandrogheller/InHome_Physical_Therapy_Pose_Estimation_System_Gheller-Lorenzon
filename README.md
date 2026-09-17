@@ -99,11 +99,14 @@ Rehab Posture Correction/
 │       ├── train_action_quality_net.py    # step 3a: GRU training
 │       └── train_action_quality_tcn.py    # step 3b: TCN training
 │
-├── references/  (generated, git-ignored)  # Reference curves (.npy) for each exercise
-├── GRU/ , TCN/  (generated, git-ignored)  # .npz datasets and model checkpoints
-├── dataset/MMFi_Dataset/ (NOT included)   # MM-Fi dataset downloaded manually (see below)
-├── yolov8n-pose.pt (NOT included)         # YOLOv8-Pose weights (auto-downloaded by Ultralytics)
-├── LICENSE                                # Apache License 2.0
+├── venv/  (generated, git-ignored)              # virtual environment to install the dependencies
+├── references/  (generated, git-ignored)        # Reference curves (.npy) for each exercise
+├── GRU/ , TCN/  (generated, git-ignored)        # .npz datasets and model checkpoints
+├── comparison_plots/  (generated, git-ignored)  # plots the comparison between the three methods
+├── dataset/MMFi_Dataset/ (NOT included)         # MM-Fi dataset downloaded manually (see below)
+├── yolov8n-pose.pt (NOT included)               # YOLOv8-Pose weights (auto-downloaded by Ultralytics)
+├── LICENSE                                      # Apache License 2.0
+├── assests/images/                              # images used in the readme file
 └── README.md
 
 ```
@@ -291,7 +294,11 @@ Since the system relies on a single RGB camera and 2D pose estimation (no depth 
 - Clothing: wear fitted clothing that contrasts with the background, so joints are clearly visible; loose or baggy clothing can hide the true position of elbows, knees, and shoulders.
 - People in the scene: ideally, only the patient should be in frame. The system includes a tracking mechanism (select_patient_keypoints) to keep following the same person if someone else (e.g. a caregiver) briefly enters the scene, but a single, uncluttered subject gives the most reliable results.
 
-(Reference images showing the ideal setup and camera framing for each exercise will be added here.)
+<p align="center">
+  <img src="assets/images/example_squat.png" width="600"><br>
+  <em>Ideal setup</em>
+</p>
+
 ---
 ## System Input and Output
 
