@@ -12,6 +12,10 @@ references/
 # NN files
 GRU/
 TCN/
+GRU_baseline/
+TCN_baseline/
+GRU_second_training/
+TCN_second_training/
 eval_action_quality_dataset.npz
 eval_quality_labels.csv
 quality_labels.csv
