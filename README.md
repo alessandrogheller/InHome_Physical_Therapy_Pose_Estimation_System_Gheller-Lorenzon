@@ -220,18 +220,29 @@ This choice means:
 ## Installation
 
 ```bash
-# 0. Create the virtual environment if it does not already exist
+# Clone the repository:
+git clone "https://github.com/alessandrogheller/Rehab_posture_correction_Gheller-Lorenzon.git"
+
+# Move into the project root: 
+cd .\Rehab_posture_correction_Gheller-Lorenzon\
+
+# Create the virtual environment (if it does not already exist)
 python -m venv venv
 
-# 1. Activate the virtual environment
+# Activate the virtual environment:
 .\venv\Scripts\Activate.ps1
 
 # If PowerShell reports an execution-policy error:
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 # Then activate the virtual environment again
 
-# 2. Install the dependencies
-pip install ultralytics opencv-python scipy torch 
+# Install the dependencies
+pip install ultralytics opencv-python scipy torch pandas matplotlib
+
+# Download the dataset following the step from the repository:
+https://github.com/ybhbingo/MMFi_dataset
+# and place it into a new folder called "dataset" in the project root
+
 ```
 
 ### Main Dependencies
@@ -254,10 +265,10 @@ The `yolov8n-pose.pt` weights are downloaded automatically by Ultralytics on fir
 ### Option A — Graphical Interface (Recommended)
 
 ```bash
-python src/main.py
+python ./src/main.py
 ```
 
-A window opens with one button for each supported exercise. When an exercise is selected, the interface automatically runs the corresponding `reference_extraction_*.py` script when necessary and then launches the matching real-time comparison script from `realtime_comparison/`.
+A window opens with one button for each supported exercise. When an exercise is selected, the interface automatically runs the corresponding `reference_extraction_*.py` script when necessary and then launches the matching real-time comparison script from `realtime_comparison/`. (it might take a lot of time the first time the code extract the reference features, also because the very it needs to download the YOLOv8-pose.pt file, in order to recognize the 17 keypoints)
 
 ### Main Parameters
 
@@ -271,7 +282,7 @@ The following parameters can be modified at the beginning of the relevant script
 ### Option B — Offline Evaluation on the MM-Fi Dataset
 
 ```bash
-python src/evaluate_dataset/evaluate_dataset_fixed_targets_squat.py
+python ./src/evaluate_dataset/evaluate_dataset_fixed_targets_squat.py
 # One evaluation script is available for each exercise in src/evaluate_dataset/
 ```
 
@@ -341,27 +352,52 @@ This design ensures that **offline dataset evaluation and online webcam evaluati
 
 The neural pipeline is an alternative and complementary approach to the rule-based method. It is designed to compare an explicit geometric strategy with a data-driven model.
 
-Run the scripts in the following order:
+The execution of the following files might take a lot of time, because they have to analize the whole dataset in order to train the neural networks. 
+Run the scripts in the following order: 
 
 ```bash
-python src/neural_network/generate_quality_labels.py    # -> GRU/quality_labels.csv, TCN/quality_labels.csv
-python src/neural_network/build_windowed_dataset.py      # -> GRU/action_quality_dataset.npz, TCN/action_quality_dataset.npz
-python src/neural_network/train_action_quality_net.py    # -> GRU/action_quality_net.pt
-python src/neural_network/train_action_quality_tcn.py    # -> TCN/action_quality_tcn.pt
-python src/realtime_comparison/realtime_inference_action_quality.py   # live inference
+python ./src/neural_network/generate_quality_labels.py    # -> GRU/quality_labels.csv, TCN/quality_labels.csv
+python ./src/neural_network/build_windowed_dataset.py      # -> GRU/action_quality_dataset.npz, TCN/action_quality_dataset.npz
+python ./src/neural_network/train_action_quality_net.py    # -> GRU/action_quality_net.pt
+python ./src/neural_network/train_action_quality_tcn.py    # -> TCN/action_quality_tcn.pt
+python ./src/realtime_comparison/realtime_inference_action_quality.py   # live inference
 ```
 
 ### Pipeline Steps
 
 - **`generate_quality_labels.py`** recalculates the same heuristic quality score for *all 40* subjects across environments E01–E04 (not just E01, unlike the `evaluate_dataset/` scripts). It does not introduce a new definition of correct exercise execution.
 - **`build_windowed_dataset.py`** normalizes each sequence by centering it on the mid-hip and scaling it according to shoulder width, as implemented in `keypoint_normalize.py`. The sequences are divided into sliding windows of 30 frames with a stride of 10. Left/right mirroring is also applied as data augmentation, so a mirrored left-lunge sample can be used as a synthetic right-lunge sample. The train/validation split is performed **by subject rather than by window**, ensuring that validation includes subjects not seen during training.
-- **`train_action_quality_net.py`** and **`train_action_quality_tcn.py`** use the same overall architecture: a shared encoder followed by two output heads, one for exercise classification and one for quality-score regression. The only architectural difference is the encoder: recurrent GRU versus convolutional TCN, so the comparison is fair.
+- **`train_action_quality_net.py`** and **`train_action_quality_tcn.py`** train the two neural network respectively, they use the same overall architecture: a shared encoder followed by two output heads, one for exercise classification and one for quality-score regression. The only architectural difference is the encoder: recurrent GRU versus convolutional TCN, so the comparison is fair.
 
 ### Important Training Limitation
 
 The neural network does **not** learn a clinical definition of correct exercise form. Instead, it learns to reproduce the same population-relative heuristic score already used by the rule-based pipeline.
 
 The quality target is therefore a **weak label**, not a clinically validated ground-truth score.
+
+### Comparison between the three methods
+
+The following scripts are used to compare the three methods analyzed in this repository, by using an evaluation dataset (different from the training dataset -> MMFi):
+
+```bash
+python ./src/evaluate_dataset/score_eval_subjects.py                         # computes the angle-based score using the same frozen target from `quality_target.json`
+python ./src/evaluate_dataset/build_eval_windowed_dataset.py                 # normalize the raw keypoints and adapting them to the same window used in the training
+python ./src/evaluate_dataset/evaluate_on_new_subjects_with_3_methods.py     # compare the three methods
+python ./src/evaluate_dataset/plot_three_evaluations.py "./three_methods_comparison.csv"  # plot the comparisons
+
+```
+
+An evaluate dataset can be built by using the following scripts:
+
+```bash
+# For every video recorded:
+python ./src/evaluate_dataset/extract_keypoints_from_video.py "<position of the records>/squat_record.mp4" S1 squat    # extract keypoints from video of squat of S1
+python ./src/evaluate_dataset/extract_keypoints_from_video.py "<position of the records>/lunge_left_record.mp4" S1 lunge_left # extract keypoints from video of lunge left of S1
+# (and so on for every exercise)        
+
+```
+
+
 
 ---
 

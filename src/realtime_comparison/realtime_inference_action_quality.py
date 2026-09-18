@@ -40,7 +40,7 @@ smoothed_score = None
 # --- Confidence gating ---
 CONFIDENCE_THRESHOLD = 0.5
 
-CAMERA_INDEX = 1
+CAMERA_INDEX = 0
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
