@@ -18,10 +18,11 @@ A pose-estimation system for home-based physical therapy: it evaluates, in real 
 10. [MM-Fi Dataset Evaluation Pipeline](#mm-fi-dataset-evaluation-pipeline)
 11. [Neural Pipeline (GRU vs TCN)](#neural-pipeline-gru-vs-tcn)
 12. [Metrics and Baselines](#metrics-and-baselines)
-13. [Third-Party Code and Libraries](#third-party-code-and-libraries)
-14. [AI/LLM Tool Usage](#aillm-tool-usage)
-15. [References](#references)
-16. [Known Limitations](#known-limitations)
+13. [Results](#results)
+14. [Third-Party Code and Libraries](#third-party-code-and-libraries)
+15. [AI/LLM Tool Usage](#aillm-tool-usage)
+16. [References](#references)
+17. [Known Limitations](#known-limitations)
 
 ---
 
@@ -366,11 +367,131 @@ The quality target is therefore a **weak label**, not a clinically validated gro
 
 ## Metrics and Baselines
 
-- **Quality score metric**: the two-zone `calculate_depth_score()` function assigns scores from 100% to 80% linearly within `DEPTH_TOLERANCE`, then decreases from 80% to 0% across `DEPTH_FALLOFF_RANGE`. This is an internal project metric used consistently in both offline and online evaluation.
+- **Quality score metric**: the two-zone `calculate_depth_score()` function (inside the file `src/utils.py`) assigns scores from 100% to 80% linearly within `DEPTH_TOLERANCE`, then decreases from 80% to 0% across `DEPTH_FALLOFF_RANGE`. This is an internal project metric used consistently in both offline and online evaluation.
 - **Baseline**: the **rule-based/geometric method** serves as the
   project's baseline condition: the squat uses a fixed target of 95° as a simple baseline based on the clinical value used by the project. For the other exercises, where no published clinical target is available, the baseline is the empirical target calculated as the mean of the MM-Fi population by `evaluate_dataset_fixed_targets_*.py`.
-- **Model comparison**: three distinct approaches are compared on the same subjects/actions — the rule-based/geometric method (a traditional CV approach) and the two deep-learning models, GRU and TCN — using classification accuracy, quality-score MAE on the 0–100 scale, parameter count, and CPU latency per window. This comparison is carried out by the script 'evaluate_on_new_subjects_with_3_methods', using the reference curves in `references/` (rule-based) and the two checkpoints produced by `train_action_quality_net.py` / `train_action_quality_tcn.py` (GRU/TCN) as inputs. The resulting numbers and discussion are reported in the final presentation/project report, not in this repository.
-- **Pose-estimation metrics**: `mmfi_lib/evaluate.py` also provides the standard MPJPE and PA-MPJPE metrics from the original MM-Fi toolkit, including Procrustes alignment, for a possible direct evaluation of pose-estimation quality against the dataset's 3D ground truth.
+- **Model comparison**: three distinct approaches are compared on the same subjects/actions — the rule-based/geometric method (a traditional CV approach) and the two deep-learning models, GRU and TCN — using classification accuracy, quality-score MAE on the 0–100 scale, parameter count, and CPU latency per window. This comparison is carried out by the script 'evaluate_on_new_subjects_with_3_methods', using the reference curves in `references/` (rule-based) and the two checkpoints produced by `train_action_quality_net.py` / `train_action_quality_tcn.py` (GRU/TCN) as inputs. The resulting numbers are briefly discussed in [Results](#results).
+- **Pose-estimation metrics**: the file `mmfi_lib/evaluate.py` is currently unused by the active pipeline (the project's own 
+metrics, defined in `src/utils.py`, are used instead) but is kept as 
+part of the reused MM-Fi toolkit and documented here for completeness.
+
+---
+
+## Results
+
+The GRU and TCN classification/quality-scoring pipeline went through
+three training iterations, each changing a specific aspect of the
+training procedure. The confusion matrices below (exercise
+classification on the independent evaluation dataset, see
+[Evaluation Dataset](#evaluation-dataset)) show how each change affected
+classification behavior across the six exercise classes.
+
+### v1 — Initial training
+
+<p align="center">
+  <img src="assets/images/confusion_matrix_v1.png" width="600"><br>
+  <em>Confusion matrix, initial training configuration</em>
+</p>
+
+The first training run used a fixed number of epochs (40), no dropout
+on the GRU (0.1 on the TCN), no weight decay, no gradient clipping, and
+a fixed learning rate. The mirrored copy of each sequence
+(`mirror_normalized_sequence()`) was applied once when the dataset was
+built, so every window seen during training was static across epochs.
+Checkpoint selection used the lowest combined validation loss.
+
+
+### v2 — Regularization and dynamic augmentation
+
+<p align="center">
+  <img src="assets/images/confusion_matrix_v2.png" width="600"><br>
+  <em>Confusion matrix after adding dynamic augmentation, regularization,
+  and accuracy-driven checkpoint selection</em>
+</p>
+
+The second iteration targeted classification quality directly:
+
+- **Dynamic augmentation**: instead of a single static mirrored copy
+  per sequence, `augment_window()` applies random rotation, scale
+  jitter, and Gaussian noise to every window on every epoch
+  (`keypoint_normalize.py`), so the network never sees the exact same
+  input twice.
+- **Regularization**: dropout raised to 0.3 on the GRU (now with 2
+  stacked layers, since `nn.GRU`'s internal dropout has no effect with
+  a single layer) and 0.2 on the TCN, plus `WEIGHT_DECAY = 1e-4` on
+  both.
+- **Gradient clipping** (max norm 5.0) and a **`ReduceLROnPlateau`**
+  scheduler (halves the learning rate after 6 stagnant epochs) were
+  added to stabilize training.
+- **Early stopping** replaced the fixed 40-epoch run: training proceeds
+  up to 150 epochs and stops after 15 epochs without improvement.
+- **Checkpoint selection** switched to the highest validation
+  **accuracy** (validation loss as tie-breaker), directly targeting the
+  metric that mattered most at this stage.
+
+This is the configuration that produced the best classification results
+observed so far:
+
+| Model | Classification accuracy |
+|---|---|
+| GRU | 86.7% |
+| TCN | 90.0% |
+
+### v3 — Reweighting the quality-score loss
+
+<p align="center">
+  <img src="assets/images/confusion_matrix_v3.png" width="600"><br>
+  <em>Confusion matrix after raising the score-loss weight and switching
+  checkpoint selection to score MAE</em>
+</p>
+
+The third iteration targeted a different problem: the GRU's quality
+score output was compressed into a narrow range (std ≈ 9.4%, observed
+range 61.9-92.3%), meaning it struggled to separate clearly good and
+bad executions. Two changes were introduced, unchanged in the v2 setup
+otherwise:
+
+- **`SCORE_LOSS_WEIGHT` raised from 0.5 to 1.2**: because classification
+  saturates almost immediately during training, the shared encoder
+  received little gradient signal to keep improving score-relevant
+  features once classification had converged. Weighting the regression
+  loss more heavily was meant to counteract this.
+- **Checkpoint selection switched to the lowest validation score MAE**
+  (classification accuracy as tie-breaker), so the saved model directly
+  targets the score-estimation metric instead of accuracy.
+
+| Model | Classification accuracy | Score std (spread) |
+|---|---|---|
+| GRU | 80.0% (↓ from 86.7%) | 7.2% (↓ from 9.4%) |
+| TCN | 86.7% (↓ from 90.0%) | 15.3% (↓ from 21.8%) |
+
+**This change was a regression, not an improvement.** Both models lost
+classification accuracy, and the score spread — the exact thing the
+change was meant to widen — shrank further instead. The most likely
+explanation is that `score_mae` is a noisier validation signal than
+accuracy on a dataset this small (5-subject validation split under a
+per-subject split), so selecting checkpoints on it picks up noise
+rather than genuine improvement, at the cost of the previously stable
+classification metric.
+
+### Recurring issue across all three versions: squat classification
+
+In every version, squat is the most frequently misclassified exercise,
+consistently confused with lunge_left/lunge_right. This is attributed
+to a **domain shift** between MM-Fi's rehabilitation-intensity squats
+(shallow knee flexion) and the fuller-depth squats performed by the
+evaluation-dataset subjects, producing knee-angle signals that fall
+outside the tolerance learned from MM-Fi rather than a model-capacity
+limitation. See [Known Limitations](#known-limitations).
+
+### Takeaway
+
+The classification-focused changes in v2 (augmentation, regularization,
+accuracy-driven checkpointing) produced a clear, measurable improvement
+over v1. The score-focused changes in v3, however, degraded
+classification without a corresponding gain in score quality 
+so the last change was ultimately a step backward.
+
 
 ---
 
